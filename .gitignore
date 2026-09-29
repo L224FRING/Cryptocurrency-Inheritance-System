@@ -1,0 +1,21 @@
+# Foundry
+out/
+cache/
+broadcast/
+*.log
+
+# Dependencies (reinstall with: forge install)
+lib/
+
+# Rust
+rust/**/target/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
