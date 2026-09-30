@@ -1,8 +1,22 @@
 [package]
 name = "frost-service"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Off-chain FROST (secp256k1) threshold signing service for the inheritance vault"
+
+default-run = "frost-service"
+
+[lib]
+name = "frost_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "frost-service"
+path = "src/main.rs"
+
+[[bin]]
+name = "frost-relay"
+path = "src/bin/relay.rs"
 
 [dependencies]
 frost-core = "3.0.0"
@@ -13,6 +27,7 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 serde_json = "1"

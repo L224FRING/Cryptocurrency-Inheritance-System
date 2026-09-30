@@ -1,128 +1,476 @@
-use std::collections::BTreeMap;
+use std::process::ExitCode;
 
-use frost_core as frost;
-use frost_secp256k1 as frostk;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
+use serde_json::json;
+
+use frost_service::coordinator::{self, SigningOutcome, SigningRequest};
+use frost_service::error::{Error, Result};
+use frost_service::report::{
+    self, BelowThresholdReport, DkgReport, SelftestReport, SignatureReport,
+};
+use frost_service::transport::{http::HttpTransport, memory::MemoryTransport, Transport};
+use frost_service::wire::{SessionId, SIGNING_DOMAIN};
 
 const MAX_SIGNERS: u16 = 5;
 const MIN_SIGNERS: u16 = 3;
+/// FROST's DKG refuses a single-signer key, so 2 is the floor for a threshold.
+const MIN_THRESHOLD: u16 = 2;
+const MESSAGE: &[u8] = b"inheritance-release-attestation";
 
-type Id = frostk::Identifier;
+const USAGE: &str = "\
+frost-service: FROST (secp256k1) threshold signing for the inheritance vault
 
-fn main() {
+usage:
+  frost-service selftest              in-process DKG + signing check
+  frost-service dkg    [options]      run the 3-part DKG across the committee
+  frost-service sign   [options]      run two-round threshold signing
+  frost-service matrix [options]      sweep n-of-m and sub-threshold subsets
+  frost-service --help
+
+options:
+  --trustees N        committee size                     (default 5)
+  --threshold T       signing threshold                  (default 3)
+  --session HEX       32-byte session id                 (default: random)
+  --domain STR        signing domain separator           (default cis/frost/release-attestation/v1)
+  --relay URL         coordinate through a relay         (default: in-process)
+  --message HEX       payload to sign                    (default: attestation string)
+  --participants L    comma-separated trustee indices    (default: 1..T)
+  --expect-failure    require rejection, report the reason
+
+Every subcommand writes one JSON document to stdout. A rejected run exits
+non-zero, so a caller never sees a failure parsed as a success.
+";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let outcome: Result<serde_json::Value> = match args.first().map(String::as_str) {
+        None | Some("selftest") => selftest().map(|r| json!(r)),
+        Some("dkg") => cmd_dkg(&args[1..]),
+        Some("sign") => cmd_sign(&args[1..]),
+        Some("matrix") => cmd_matrix(&args[1..]),
+        Some("--help" | "-h") => {
+            print!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        Some(other) => Err(Error::BadArgument(format!("unknown command `{other}`"))),
+    };
+
+    match outcome.and_then(|value| report::emit(&value)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            report::emit_failure(e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn random_session() -> SessionId {
+    let mut session = [0u8; 32];
+    OsRng.fill_bytes(&mut session);
+    session
+}
+
+fn selftest() -> Result<SelftestReport> {
     let mut rng = OsRng;
-    let n = MAX_SIGNERS as usize;
-    let t = MIN_SIGNERS as usize;
+    let session = random_session();
 
-    // ---- DKG round 1 ----
-    let mut r1_secret = BTreeMap::<Id, frostk::keys::dkg::round1::SecretPackage>::new();
-    let mut r1_recv = BTreeMap::<Id, BTreeMap<Id, frostk::keys::dkg::round1::Package>>::new();
-    for i in 1..=n {
-        let id: Id = (i as u16).try_into().unwrap();
-        let (secret, package) = frostk::keys::dkg::part1(id, MAX_SIGNERS, MIN_SIGNERS, &mut rng).unwrap();
-        r1_secret.insert(id, secret);
-        for j in 1..=n {
-            if i == j {
-                continue;
+    let mut parties = coordinator::new_committee(MAX_SIGNERS)?;
+    let mut transport = MemoryTransport::new(coordinator::committee(MAX_SIGNERS));
+
+    let dkg = coordinator::run_dkg(&mut parties, &mut transport, session, MIN_SIGNERS, &mut rng)?;
+
+    let signers: Vec<u16> = (1..=MIN_SIGNERS).collect();
+    let signed = coordinator::run_signing(
+        &mut parties,
+        &mut transport,
+        &SigningRequest::new(session, MIN_SIGNERS, &signers, MESSAGE, SIGNING_DOMAIN),
+        &mut rng,
+    )?;
+
+    // A subset below the threshold must be unable to produce a signature.
+    let short: Vec<u16> = (1..MIN_SIGNERS).collect();
+    let (rejections, error) = match coordinator::run_signing(
+        &mut parties,
+        &mut transport,
+        &SigningRequest::new(session, MIN_SIGNERS, &short, MESSAGE, SIGNING_DOMAIN),
+        &mut rng,
+    ) {
+        Ok(_) => (
+            Vec::new(),
+            Some("below-threshold run produced a signature".to_string()),
+        ),
+        Err(e) => (vec![format!("session refused: {e}")], Some(e.to_string())),
+    };
+
+    Ok(SelftestReport {
+        status: "ok",
+        scheme: "frost-secp256k1",
+        dkg: DkgReport {
+            trustees: MAX_SIGNERS,
+            threshold: MIN_SIGNERS,
+            label: format!("{MIN_SIGNERS}-of-{MAX_SIGNERS}"),
+        },
+        group_verifying_key: dkg.group_verifying_key,
+        signature: SignatureReport {
+            message: String::from_utf8_lossy(MESSAGE).into_owned(),
+            message_hex: hex::encode(MESSAGE),
+            signers,
+            shares_aggregated: MIN_SIGNERS,
+            value: signed.signature,
+            verified_against_group_key: true,
+        },
+        below_threshold: BelowThresholdReport {
+            signers: short,
+            rejections,
+            aggregate_rejected: true,
+            aggregate_error: error,
+        },
+    })
+}
+
+struct Options {
+    trustees: u16,
+    threshold: u16,
+    session: SessionId,
+    domain: String,
+    relay: Option<String>,
+    message: Vec<u8>,
+    participants: Vec<u16>,
+    expect_failure: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            trustees: MAX_SIGNERS,
+            threshold: MIN_SIGNERS,
+            session: random_session(),
+            domain: SIGNING_DOMAIN.to_string(),
+            relay: None,
+            message: MESSAGE.to_vec(),
+            participants: Vec::new(),
+            expect_failure: false,
+        }
+    }
+}
+
+fn parse_options(args: &[String]) -> Result<Options> {
+    let mut options = Options::default();
+    let mut participants_set = false;
+    let mut i = 0;
+
+    while i < args.len() {
+        let flag = args[i].as_str();
+        let next = |i: usize| -> Result<String> {
+            args.get(i + 1)
+                .cloned()
+                .ok_or_else(|| Error::BadArgument(format!("{flag} needs a value")))
+        };
+
+        match flag {
+            "--trustees" => options.trustees = next(i)?.parse().map_err(bad_number)?,
+            "--threshold" => options.threshold = next(i)?.parse().map_err(bad_number)?,
+            "--session" => options.session = parse_session(&next(i)?)?,
+            "--domain" => options.domain = next(i)?,
+            "--relay" => options.relay = Some(next(i)?),
+            "--message" => options.message = parse_hex(&next(i)?, "--message")?,
+            "--participants" => {
+                options.participants = parse_list(&next(i)?)?;
+                participants_set = true;
             }
-            let rid: Id = (j as u16).try_into().unwrap();
-            r1_recv.entry(rid).or_default().insert(id, package.clone());
+            "--expect-failure" => options.expect_failure = true,
+            other => return Err(Error::BadArgument(format!("unknown flag `{other}`"))),
+        }
+
+        i += if flag == "--expect-failure" { 1 } else { 2 };
+    }
+
+    if options.threshold < MIN_THRESHOLD || options.threshold > options.trustees {
+        return Err(Error::BadArgument(format!(
+            "threshold {} is not within {MIN_THRESHOLD}..={}",
+            options.threshold, options.trustees
+        )));
+    }
+    if !participants_set {
+        options.participants = (1..=options.threshold).collect();
+    }
+    for index in &options.participants {
+        if *index == 0 || *index > options.trustees {
+            return Err(Error::BadArgument(format!(
+                "trustee {index} is outside the committee of {}",
+                options.trustees
+            )));
         }
     }
+    Ok(options)
+}
 
-    // ---- DKG round 2 ----
-    let mut r2_secret = BTreeMap::<Id, frostk::keys::dkg::round2::SecretPackage>::new();
-    let mut r2_recv = BTreeMap::<Id, BTreeMap<Id, frostk::keys::dkg::round2::Package>>::new();
-    for i in 1..=n {
-        let id: Id = (i as u16).try_into().unwrap();
-        let (secret, packages) =
-            frostk::keys::dkg::part2(r1_secret.remove(&id).unwrap(), &r1_recv[&id]).unwrap();
-        r2_secret.insert(id, secret);
-        for (receiver, package) in packages {
-            r2_recv.entry(receiver).or_default().insert(id, package);
-        }
+fn bad_number(e: std::num::ParseIntError) -> Error {
+    Error::BadArgument(format!("not a number: {e}"))
+}
+
+fn parse_hex(raw: &str, flag: &str) -> Result<Vec<u8>> {
+    hex::decode(raw.trim_start_matches("0x"))
+        .map_err(|e| Error::Malformed(format!("{flag} is not hex: {e}")))
+}
+
+fn parse_session(raw: &str) -> Result<SessionId> {
+    let bytes = parse_hex(raw, "--session")?;
+    if bytes.len() != 32 {
+        return Err(Error::Malformed(format!(
+            "--session must be 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut session = [0u8; 32];
+    session.copy_from_slice(&bytes);
+    Ok(session)
+}
+
+fn parse_list(raw: &str) -> Result<Vec<u16>> {
+    raw.split(',')
+        .map(|part| {
+            part.trim().parse::<u16>().map_err(|e| {
+                Error::BadArgument(format!("bad trustee index `{}`: {e}", part.trim()))
+            })
+        })
+        .collect()
+}
+
+fn transport_for(options: &Options) -> Box<dyn Transport> {
+    match &options.relay {
+        Some(url) => Box::new(HttpTransport::new(url.clone())),
+        None => Box::new(MemoryTransport::new((1..=options.trustees).collect())),
+    }
+}
+
+fn cmd_dkg(args: &[String]) -> Result<serde_json::Value> {
+    let options = parse_options(args)?;
+    let mut rng = OsRng;
+    let mut parties = coordinator::new_committee(options.trustees)?;
+    let mut transport = transport_for(&options);
+
+    let outcome = coordinator::run_dkg(
+        &mut parties,
+        transport.as_mut(),
+        options.session,
+        options.threshold,
+        &mut rng,
+    );
+
+    match outcome {
+        Ok(dkg) if !options.expect_failure => Ok(json!(dkg)),
+        Ok(_) => Err(Error::BadArgument(
+            "DKG unexpectedly succeeded under --expect-failure".to_string(),
+        )),
+        Err(e) if options.expect_failure => Ok(json!({
+            "status": "rejected_as_expected",
+            "error": e.to_string(),
+        })),
+        Err(e) => Err(e),
+    }
+}
+
+fn cmd_sign(args: &[String]) -> Result<serde_json::Value> {
+    let options = parse_options(args)?;
+    let mut rng = OsRng;
+    let mut parties = coordinator::new_committee(options.trustees)?;
+    let mut transport = transport_for(&options);
+
+    let dkg = coordinator::run_dkg(
+        &mut parties,
+        transport.as_mut(),
+        options.session,
+        options.threshold,
+        &mut rng,
+    )?;
+    if options.expect_failure {
+        return Err(Error::BadArgument(
+            "--expect-failure is not meaningful for a command that runs a DKG first".to_string(),
+        ));
     }
 
-    // ---- DKG part 3: long-lived key packages ----
-    let mut key_packages = BTreeMap::<Id, frostk::keys::KeyPackage>::new();
-    let mut pubkey_package = None;
-    for i in 1..=n {
-        let id: Id = (i as u16).try_into().unwrap();
-        let (key_package, pkgs) =
-            frostk::keys::dkg::part3(&r2_secret[&id], &r1_recv[&id], &r2_recv[&id]).unwrap();
-        pubkey_package = Some(pkgs);
-        key_packages.insert(id, key_package);
+    let outcome = coordinator::run_signing(
+        &mut parties,
+        transport.as_mut(),
+        &SigningRequest::new(
+            options.session,
+            options.threshold,
+            &options.participants,
+            &options.message,
+            &options.domain,
+        ),
+        &mut rng,
+    );
+
+    match outcome {
+        Ok(signed) => Ok(json!({
+            "status": "ok",
+            "dkg": {
+                "trustees": dkg.trustees,
+                "threshold": dkg.threshold,
+                "group_verifying_key": dkg.group_verifying_key,
+            },
+            "signing": signed,
+        })),
+        Err(e) => Err(e),
     }
-    let pubkey_package = pubkey_package.unwrap();
+}
 
-    let group_vk = pubkey_package.verifying_key().serialize().unwrap();
-    println!("trustees              {n}");
-    println!("threshold             {t}-of-{n}");
-    println!("group verifying key   {}", hex::encode(&group_vk));
+#[derive(serde::Serialize)]
+struct MatrixCase {
+    trustees: u16,
+    threshold: u16,
+    participants: Vec<u16>,
+    expected: &'static str,
+    result: &'static str,
+    error: Option<String>,
+    signature: Option<String>,
+}
 
-    let message = b"inheritance-release-attestation";
+#[derive(serde::Serialize)]
+struct MatrixReport {
+    status: &'static str,
+    trustees_swept: Vec<u16>,
+    cases: Vec<MatrixCase>,
+    passed: usize,
+    failed: usize,
+}
 
-    // ---- signing round 1: a {t}-signer subset commits ----
-    let signers: Vec<Id> = (1..=t).map(|i| (i as u16).try_into().unwrap()).collect();
-    let mut nonces = BTreeMap::new();
-    let mut commitments = BTreeMap::<Id, frostk::round1::SigningCommitments>::new();
-    for id in &signers {
-        let kp = &key_packages[id];
-        let (nonce, commitment) = frostk::round1::commit(&kp.signing_share(), &mut rng);
-        nonces.insert(*id, nonce);
-        commitments.insert(*id, commitment);
-    }
+/// Sweep threshold-sized and sub-threshold subsets across several committees.
+fn cmd_matrix(args: &[String]) -> Result<serde_json::Value> {
+    let options = parse_options(args)?;
+    let mut rng = OsRng;
+    let mut cases = Vec::new();
+    let mut swept = Vec::new();
 
-    let signing_package = frostk::SigningPackage::new(commitments, message);
+    let sizes: Vec<u16> = [2, 3, options.trustees]
+        .into_iter()
+        .filter(|n| *n <= options.trustees)
+        .collect();
 
-    // ---- signing round 2: each signer produces a share ----
-    let mut shares = BTreeMap::new();
-    for id in &signers {
-        let kp = &key_packages[id];
-        let share = frostk::round2::sign(&signing_package, &nonces[id], kp).unwrap();
-        frost::verify_signature_share(
-            *id,
-            &kp.verifying_share(),
-            &share,
-            &signing_package,
-            &pubkey_package.verifying_key(),
-        )
-        .unwrap();
-        shares.insert(*id, share);
-    }
+    for trustees in sizes {
+        swept.push(trustees);
+        for threshold in MIN_THRESHOLD..=trustees {
+            let mut parties = coordinator::new_committee(trustees)?;
+            let mut transport = MemoryTransport::new(coordinator::committee(trustees));
+            let session = random_session();
 
-    let signature = frostk::aggregate(&signing_package, &shares, &pubkey_package).unwrap();
-    pubkey_package.verifying_key().verify(message, &signature).unwrap();
+            coordinator::run_dkg(&mut parties, &mut transport, session, threshold, &mut rng)?;
 
-    println!();
-    println!("message               {}", String::from_utf8_lossy(message));
-    println!("shares aggregated     {}/{} signers", shares.len(), n);
-    println!("frost signature       {}", hex::encode(signature.serialize().unwrap()));
-    println!("verified against vkey ok");
+            // Every signing run gets its own session id. A session may only be
+            // signed over once, so reusing one would be refused by design.
+            let sign_session = |rng: &mut rand_core::OsRng| {
+                let mut s = [0u8; 32];
+                rng.fill_bytes(&mut s);
+                s
+            };
 
-    // ---- a subset below the threshold must be unable to sign ----
-    let short: Vec<Id> = (1..t).map(|i| (i as u16).try_into().unwrap()).collect();
-    let mut short_commitments = BTreeMap::<Id, frostk::round1::SigningCommitments>::new();
-    let mut short_nonces = BTreeMap::new();
-    for id in &short {
-        let kp = &key_packages[id];
-        let (nonce, commitment) = frostk::round1::commit(&kp.signing_share(), &mut rng);
-        short_nonces.insert(*id, nonce);
-        short_commitments.insert(*id, commitment);
-    }
-    let short_package = frostk::SigningPackage::new(short_commitments, message);
-    let mut short_shares = BTreeMap::new();
-    for id in &short {
-        let kp = &key_packages[id];
-        match frostk::round2::sign(&short_package, &short_nonces[id], kp) {
-            Ok(share) => {
-                short_shares.insert(*id, share);
+            // Exactly the threshold must succeed.
+            let at_threshold: Vec<u16> = (1..=threshold).collect();
+            cases.push(record(
+                trustees,
+                threshold,
+                &at_threshold,
+                "signature verifies",
+                coordinator::run_signing(
+                    &mut parties,
+                    &mut transport,
+                    &SigningRequest::new(
+                        sign_session(&mut rng),
+                        threshold,
+                        &at_threshold,
+                        &options.message,
+                        &options.domain,
+                    ),
+                    &mut rng,
+                ),
+            ));
+
+            // More than the threshold must also succeed.
+            if threshold < trustees {
+                let above: Vec<u16> = (1..=trustees).collect();
+                cases.push(record(
+                    trustees,
+                    threshold,
+                    &above,
+                    "signature verifies",
+                    coordinator::run_signing(
+                        &mut parties,
+                        &mut transport,
+                        &SigningRequest::new(
+                            sign_session(&mut rng),
+                            threshold,
+                            &above,
+                            &options.message,
+                            &options.domain,
+                        ),
+                        &mut rng,
+                    ),
+                ));
             }
-            Err(e) => println!("below-threshold sign   rejected: {e}"),
+
+            // One short of the threshold must fail.
+            if threshold >= 2 {
+                let below: Vec<u16> = (1..threshold).collect();
+                cases.push(record(
+                    trustees,
+                    threshold,
+                    &below,
+                    "rejected",
+                    coordinator::run_signing(
+                        &mut parties,
+                        &mut transport,
+                        &SigningRequest::new(
+                            sign_session(&mut rng),
+                            threshold,
+                            &below,
+                            &options.message,
+                            &options.domain,
+                        ),
+                        &mut rng,
+                    ),
+                ));
+            }
         }
     }
-    match frostk::aggregate(&short_package, &short_shares, &pubkey_package) {
-        Ok(_) => println!("below-threshold aggregate UNEXPECTEDLY SUCCEEDED"),
-        Err(e) => println!("below-threshold aggregate rejected: {e}"),
+
+    let failed = cases.iter().filter(|c| c.result != c.expected).count();
+    Ok(json!(MatrixReport {
+        status: if failed == 0 { "ok" } else { "failed" },
+        trustees_swept: swept,
+        passed: cases.len() - failed,
+        failed,
+        cases,
+    }))
+}
+
+fn record(
+    trustees: u16,
+    threshold: u16,
+    participants: &[u16],
+    expected: &'static str,
+    outcome: Result<SigningOutcome>,
+) -> MatrixCase {
+    match outcome {
+        Ok(signed) => MatrixCase {
+            trustees,
+            threshold,
+            participants: participants.to_vec(),
+            expected,
+            result: "signature verifies",
+            error: None,
+            signature: Some(signed.signature),
+        },
+        Err(e) => MatrixCase {
+            trustees,
+            threshold,
+            participants: participants.to_vec(),
+            expected,
+            result: "rejected",
+            error: Some(e.to_string()),
+            signature: None,
+        },
     }
 }
