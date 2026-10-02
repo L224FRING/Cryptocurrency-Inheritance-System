@@ -11,6 +11,8 @@ use frost_service::report::{
 use frost_service::transport::{http::HttpTransport, memory::MemoryTransport, Transport};
 use frost_service::wire::{SessionId, SIGNING_DOMAIN};
 
+
+
 const MAX_SIGNERS: u16 = 5;
 const MIN_SIGNERS: u16 = 3;
 /// FROST's DKG refuses a single-signer key, so 2 is the floor for a threshold.
@@ -25,6 +27,7 @@ usage:
   frost-service dkg    [options]      run the 3-part DKG across the committee
   frost-service sign   [options]      run two-round threshold signing
   frost-service matrix [options]      sweep n-of-m and sub-threshold subsets
+  frost-service vdf    [options]      compute or verify a VDF proof
   frost-service --help
 
 options:
@@ -49,6 +52,7 @@ fn main() -> ExitCode {
         Some("dkg") => cmd_dkg(&args[1..]),
         Some("sign") => cmd_sign(&args[1..]),
         Some("matrix") => cmd_matrix(&args[1..]),
+        Some("vdf") => cmd_vdf(&args[1..]),
         Some("--help" | "-h") => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -473,4 +477,117 @@ fn record(
             signature: None,
         },
     }
+}
+
+// VDF commands
+fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
+    let mut t: u64 = 100;
+    let mut bits: usize = 1024;
+    let mut input_hex = String::from("deadbeef");
+    let mut verify = false;
+    let mut x_str: Option<String> = None;
+    let mut y_str: Option<String> = None;
+    let mut proof_strs: Vec<String> = Vec::new();
+    
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "selftest" => {
+                i += 1;
+                continue;
+            }
+            "--t" => {
+                if i + 1 < args.len() {
+                    t = args[i + 1].parse().map_err(|e| Error::BadArgument(format!("bad t: {e}")))?;
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--t needs value".to_string()));
+                }
+            }
+            "--bits" => {
+                if i + 1 < args.len() {
+                    bits = args[i + 1].parse().map_err(|e| Error::BadArgument(format!("bad bits: {e}")))?;
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--bits needs value".to_string()));
+                }
+            }
+            "--input" => {
+                if i + 1 < args.len() {
+                    input_hex = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--input needs value".to_string()));
+                }
+            }
+            "--verify" => {
+                verify = true;
+                i += 1;
+            }
+            "--x" => {
+                if i + 1 < args.len() {
+                    x_str = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--x needs value".to_string()));
+                }
+            }
+            "--y" => {
+                if i + 1 < args.len() {
+                    y_str = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--y needs value".to_string()));
+                }
+            }
+            "--proof" => {
+                if i + 1 < args.len() {
+                    proof_strs.push(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--proof needs value".to_string()));
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    
+    if verify {
+        if let (Some(xs), Some(ys)) = (x_str, y_str) {
+            use num_bigint::BigUint;
+            let x: BigUint = xs.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(&xs).unwrap_or_default()));
+            let y: BigUint = ys.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(&ys).unwrap_or_default()));
+            let mut proof: Vec<BigUint> = Vec::new();
+            for p in &proof_strs {
+                if let Ok(b) = hex::decode(p) {
+                    proof.push(BigUint::from_bytes_be(&b));
+                }
+            }
+            let n = BigUint::from(0x10001u64) * BigUint::from(0x7fffffff12345678u64);
+            let result = frost_service::vdf::verify_vdf_pietrzak(&x, &y, &proof, t, &n);
+            return Ok(json!({
+                "verified": result,
+                "t": t,
+                "n": n.to_str_radix(10)
+            }));
+        }
+    }
+    
+    // Compute mode
+    use num_bigint::BigUint;
+    let mut rng = OsRng;
+    let n = frost_service::vdf::generate_rsa_modulus(&mut rng, bits);
+    let input_bytes = hex::decode(&input_hex).unwrap_or_else(|_| input_hex.as_bytes().to_vec());
+    let x = BigUint::from_bytes_be(&input_bytes);
+    let res = frost_service::vdf::compute_vdf_with_proof(&x, &frost_service::vdf::VDFParams { n: n.clone(), t });
+    Ok(json!({
+        "x": x.to_str_radix(16),
+        "y": res.y.to_str_radix(16),
+        "t": t,
+        "n": n.to_str_radix(16),
+        "proof_points": res.proof.iter().map(|p| p.to_str_radix(16)).collect::<Vec<_>>(),
+        "status": "ok"
+    }))
 }

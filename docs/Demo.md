@@ -109,6 +109,32 @@ Talking point: *"This is the seam the contracts will sit on."*
   printing the requested address instead of the bound one)
 - `docs/Formal_Spec_Threat_Model.md` — the spec
 
+
+## 7. VDF computation and verification (Rust) (~30s)
+
+The Verifiable Delay Function (Pietrzak's construction) provides sequential
+time delay that cannot be parallelized. The Rust implementation computes
+y = x^(2^t) mod N and generates proof points.
+
+```sh
+rust/frost-service/target/debug/frost-service vdf
+```
+
+Walk the JSON:
+- `x` - input value (hex)
+- `y` - computed output after 2^t sequential squarings (hex)  
+- `t` - number of squaring steps
+- `n` - RSA modulus (hex)
+- `proof_points` - Pietrzak proof halfway values for fast verification
+- `status: "ok"`
+
+Try with custom parameters:
+
+```sh
+rust/frost-service/target/debug/frost-service vdf --t 20 --input 0x1234abcd
+```
+
+Talking point: *"The computation is intentionally sequential - parallelization doesn't help. The proof allows verification in O(log t) steps rather than recomputing O(t) squarings."*
 ## Close
 
 *"What we have not done yet: the VDF + inactivity clock. That is the next

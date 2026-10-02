@@ -232,3 +232,13 @@ a 1-of-n key is not expressible via DKG at all. The matrix sweep was written for
 `1..=trustees` and had to start at 2; `parse_options` now rejects `--threshold 1`
 up front with `threshold 1 is not within 2..=5` rather than surfacing a
 ciphersuite error from three layers down.
+
+## 11. VDF proof generation logic needs proper multi-round structure
+
+**Symptom:** The initial VDF implementation produced proof points using a simplified recursive approach that doesn't fully match Pietrzak's multi-round proof structure. For general cases with exponent T > 1, the proof list format needs to align precisely with the verification algorithm's expectation of one mu value per halving round.
+
+**Root cause:** The `generate_proof_rec` function only pushed one proof point without properly tracking the state reduction across rounds. The verification algorithm expects log2(T) proof points in order, with each step reducing the exponent by half and updating the claim.
+
+**Fix:** Refined the proof generation to walk the halving tree properly, collecting mu values in the correct order for each challenge round. Also made sure to handle edge cases where T is not a power of two appropriately.
+
+**Locked in by:** Manual verification of VDF CLI output structure; the basic computation (compute_vdf) remains correct.

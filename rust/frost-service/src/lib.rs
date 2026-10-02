@@ -28,3 +28,6 @@ pub use wire::{Envelope, MessageKind, SessionId};
 pub use frost_core;
 pub use frost_secp256k1;
 pub use rand_core;
+
+pub mod vdf;
+pub use vdf::{VDFParams, VDFProof, VDFResult, compute_vdf, compute_vdf_with_proof, verify_vdf_pietrzak, generate_rsa_modulus};
