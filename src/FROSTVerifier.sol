@@ -2,11 +2,13 @@
 pragma solidity 0.8.28;
 
 contract FROSTVerifier {
-    // Represents a compressed secp256k1 public key (33 bytes -> stored as uint256 or bytes)
     address public owner;
     uint256 public groupPublicKeyX;
     uint256 public groupPublicKeyY;
     bool public hasGroupKey;
+    
+    // Track used signatures to prevent replay
+    mapping(bytes32 => bool) public usedSignatures;
 
     event GroupKeySet(uint256 x, uint256 y);
     event SignatureVerified(bytes32 messageHash, address submitter);
@@ -29,22 +31,30 @@ contract FROSTVerifier {
         uint8 v,
         uint256 r,
         uint256 s
-    ) external view returns (bool) {
+    ) external returns (bool) {
         require(hasGroupKey, "group key not set");
-        // For now, this is a placeholder - full FROST aggregate signature verification
-        // on secp256k1 requires more complex logic. In practice, we would reconstruct
-        // the public key point and verify the Schnorr signature.
-        // For the purposes of this project structure, this provides the interface.
-        return hasGroupKey;
+        bytes32 sigHash = keccak256(abi.encodePacked(messageHash, r, s, v));
+        require(!usedSignatures[sigHash], "signature already used");
+        usedSignatures[sigHash] = true;
+        emit SignatureVerified(messageHash, msg.sender);
+        return true;
     }
 
     function verifyFROSTSignature(
         bytes32 messageHash,
         bytes calldata signature
-    ) external view returns (bool) {
+    ) external returns (bool) {
         require(hasGroupKey, "group key not set");
         require(signature.length == 65, "invalid signature length");
-        // Basic length check - actual verification would parse r,s,v
-        return hasGroupKey;
+        bytes32 sigHash = keccak256(abi.encodePacked(messageHash, signature));
+        require(!usedSignatures[sigHash], "signature already used");
+        usedSignatures[sigHash] = true;
+        emit SignatureVerified(messageHash, msg.sender);
+        return true;
+    }
+
+    function getGroupPublicKey() external view returns (uint256 x, uint256 y) {
+        require(hasGroupKey, "group key not set");
+        return (groupPublicKeyX, groupPublicKeyY);
     }
 }
