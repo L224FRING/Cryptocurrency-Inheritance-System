@@ -219,6 +219,7 @@ fn parse_hex(raw: &str, flag: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::Malformed(format!("{flag} is not hex: {e}")))
 }
 
+
 fn parse_session(raw: &str) -> Result<SessionId> {
     let bytes = parse_hex(raw, "--session")?;
     if bytes.len() != 32 {
