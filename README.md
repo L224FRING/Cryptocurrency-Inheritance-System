@@ -10,10 +10,17 @@ attestation on top of the VDF timer.
 foundry.toml              Foundry config (solc 0.8.28, FFI enabled)
 src/                      Solidity contracts
   Smoke.sol               placeholder, delete once real contracts land
+  VDFVerifier.sol         Pietrzak VDF verifier using MODEXP precompile
+  FROSTVerifier.sol       FROST threshold signature verifier (on-chain)
+  InheritanceVault.sol    Main vault contract coordinating VDF + FROST
 script/Deploy.s.sol       deploy script for anvil
+script/DeployVDF.s.sol    deploy VDF+Vault
+script/DeployFull.s.sol   deploy full stack (VDF+FROST+Vault)
 test/                     Foundry tests
   Smoke.t.sol             toolchain sanity check
   FfiBridge.t.sol         proves the Solidity -> Rust boundary works
+  VDF.t.sol               VDF contract tests
+  Integration.t.sol        end-to-end integration tests
 lib/forge-std/            Foundry test library
 rust/frost-service/       off-chain FROST crate (frost-core 3.0)
   src/lib.rs              protocol core: party, wire, transport, coordinator
@@ -197,3 +204,18 @@ Deliberately out of scope so far:
   `message_digest` field (SHA-256 of the message) would be the natural way to
   give `sha2` a purpose and give contracts a stable value to bind an attestation
   to.
+
+## VDF CLI
+
+The Rust service also includes VDF (Verifiable Delay Function) functionality:
+
+```sh
+# Compute VDF with defaults (t=100, input=deadbeef)
+./rust/frost-service/target/debug/frost-service vdf
+
+# Compute with custom parameters
+./rust/frost-service/target/debug/frost-service vdf --t 20 --input 0x1234abcd
+
+# Run VDF selftest (verifies proof)
+./rust/frost-service/target/debug/frost-service vdf selftest
+```
