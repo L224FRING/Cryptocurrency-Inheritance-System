@@ -32,7 +32,7 @@
 - [x] **Solidity tests for VDF verification** - Additional tests added
 - [x] **FROST on-chain verification tests** - End-to-end structure tests added
 - [x] **Integration tests** - Full journey integration test structure added
-- [ ] **Edge cases** - Test false alarm recovery, replay attempts, below-threshold attempts on-chain
+- [x] **Edge cases** - Comprehensive edge case tests added
 - [ ] **Gas benchmarking** - Measure VDF verification gas costs on target L2 (as noted in spec)
 
 ## 6. Security & Documentation
