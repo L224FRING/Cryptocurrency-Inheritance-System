@@ -23,7 +23,7 @@
 
 ## 4. Rust/Off-Chain Enhancements
 - [x] **Add VDF selftest command** - VDF selftest added and working
-- [ ] **Key share persistence** - Currently in-memory only. Add secure storage for trustee key shares
+- [x] **Key share persistence** - Basic persistence module added for trustee shares
 - [ ] **Attestation flow** - Implement death attestation command/logic separate from release signing
 - [ ] **Relay production hardening** - Add TLS/auth for relay if used in production (currently plaintext HTTP)
 - [ ] **Better error handling** - Expand error types and reporting as needed
