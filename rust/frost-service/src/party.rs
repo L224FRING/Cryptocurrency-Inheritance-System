@@ -6,6 +6,7 @@ use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::persistence::TrusteeShare;
 use crate::wire::{signing_message, Envelope, MessageKind, SessionId, BROADCAST};
 
 type Id = frostk::Identifier;
@@ -134,6 +135,93 @@ impl Party {
             .verifying_key()
             .serialize()
             .map_err(|e| Error::Rejected(format!("group key serialization failed: {e}")))
+    }
+
+    // ---- Persistence -----------------------------------------------------
+
+    /// Serialize this trustee's key material for storage. The returned record
+    /// contains only this party's secret share and the public package; handing
+    /// it to anyone else would defeat the threshold, so callers must treat the
+    /// file as a secret.
+    pub fn export_share(&self, committee: &[u16], threshold: u16) -> Result<TrusteeShare> {
+        let key_package = self
+            .key_package
+            .as_ref()
+            .ok_or_else(|| Error::NotReady("no key share to export".to_string()))?;
+        let public_key_package = self
+            .public_key_package
+            .as_ref()
+            .ok_or_else(|| Error::NotReady("no public key package to export".to_string()))?;
+
+        Ok(TrusteeShare {
+            trustee_id: self.me(),
+            committee: committee.to_vec(),
+            threshold,
+            group_verifying_key: hex::encode(self.group_verifying_key()?),
+            key_package: key_package
+                .serialize()
+                .map_err(|e| Error::Rejected(format!("key package serialization failed: {e}")))?,
+            public_key_package: public_key_package.serialize().map_err(|e| {
+                Error::Rejected(format!("public key package serialization failed: {e}"))
+            })?,
+        })
+    }
+
+    /// Rebuild a trustee from a stored share. The roster and threshold come
+    /// from the file, and the embedded group key must match the recorded one so
+    /// a corrupted or swapped share is rejected before it can sign.
+    pub fn from_share(share: &TrusteeShare) -> Result<Self> {
+        let mut party = Self::new(share.trustee_id, &share.committee)?;
+
+        let key_package = frostk::keys::KeyPackage::deserialize(&share.key_package)
+            .map_err(|e| Error::Rejected(format!("key package rejected: {e}")))?;
+        let public_key_package =
+            frostk::keys::PublicKeyPackage::deserialize(&share.public_key_package)
+                .map_err(|e| Error::Rejected(format!("public key package rejected: {e}")))?;
+
+        let derived = hex::encode(
+            public_key_package
+                .verifying_key()
+                .serialize()
+                .map_err(|e| Error::Rejected(format!("group key serialization failed: {e}")))?,
+        );
+        if derived != share.group_verifying_key {
+            return Err(Error::Rejected(format!(
+                "share group key {derived} does not match recorded {}",
+                share.group_verifying_key
+            )));
+        }
+
+        party.key_package = Some(key_package);
+        party.public_key_package = Some(public_key_package);
+        Ok(party)
+    }
+
+    // ---- Progress accessors ---------------------------------------------
+    //
+    // A standalone client polls the relay and needs to know when it holds
+    // enough messages to take the next step. These counts are that signal.
+
+    pub fn dkg_round1_count(&self) -> usize {
+        self.dkg.as_ref().map(|s| s.round1_from.len()).unwrap_or(0)
+    }
+
+    pub fn dkg_round2_count(&self) -> usize {
+        self.dkg.as_ref().map(|s| s.round2_from.len()).unwrap_or(0)
+    }
+
+    pub fn signing_commitment_count(&self, session: &SessionId) -> usize {
+        self.signing_commitments
+            .get(session)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    pub fn signature_share_count(&self, session: &SessionId) -> usize {
+        self.signature_shares
+            .get(session)
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     fn index_of(&self, id: &Id) -> Result<u16> {

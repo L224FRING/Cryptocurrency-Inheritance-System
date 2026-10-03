@@ -16,7 +16,7 @@ Two binaries, one library:
 | Target | Purpose |
 | --- | --- |
 | `lib` (`frost_service`) | the protocol core: each trustee as a `Party`, the message format in `wire`, the coordination layer in `coordinator`, and pluggable `transport`s |
-| `bin/frost-service` | CLI: `selftest`, `dkg`, `sign`, `matrix`. Always takes from stdin nothing, writes one JSON document to stdout, exits 0 only on success |
+| `bin/frost-service` | CLI: `selftest`, `dkg`, `sign`, `matrix`, and the per-trustee `dkg-party` / `sign-party`. Always takes from stdin nothing, writes one JSON document to stdout, exits 0 only on success |
 | `bin/frost-relay` | an untrusted message courier. Routes JSON envelopes between trustee mailboxes over blocking HTTP, remembers nothing |
 
 The service implements **two multi-round protocols** end to end:
@@ -47,7 +47,9 @@ src/lib.rs                 crate root, re-exports the public surface
 src/error.rs               one Error enum, one Result alias
 src/wire.rs                SessionId, Envelope, MessageKind, signed-message builder
 src/party.rs               a single trustee's state machine + local crypto
-src/coordinator.rs         pumps envelopes until quiet, runs full sessions
+src/coordinator.rs         pumps envelopes until quiet, runs full in-process sessions
+src/client.rs              drives ONE trustee across a relay (per-trustee mode)
+src/persistence.rs         on-disk TrusteeShare: one file per trustee's key material
 src/transport/mod.rs       the Transport trait
 src/transport/memory.rs    in-process transport (tests, CLI default)
 src/transport/http.rs      relay client + the relay's queue state
@@ -55,11 +57,14 @@ src/bin/relay.rs           the frost-relay HTTP server
 src/main.rs                the CLI
 src/report.rs              the JSON report shapes + stdout writer
 tests/protocol.rs          16 end-to-end tests against real protocol runs
+tests/per_trustee.rs       2 tests where each trustee is its own process
 ```
 
 Dependency direction is one-way: `party` and `coordinator` depend on `wire`
 and `error`; `transport` is a separate concern both sides plug into;
-`coordinator` sits on top and knows only the `Transport` trait.
+`coordinator` sits on top and knows only the `Transport` trait. `client` sits
+beside `coordinator` on the same `Party` + `Transport` seam, but drives a single
+party instead of the whole committee; `persistence` is a leaf used by the CLI.
 
 ---
 
@@ -301,6 +306,48 @@ unbundled version was eight positional arguments, and partly to make
 single-use sessions awkward: to sign twice you must *build a second request*,
 not tweak an argument.
 
+### 5.1 Per-trustee drivers: `client`
+
+The coordinator owns every party at once. That is ideal for tests and for a
+one-shot demo, but it hides the trust boundary: one process holds every share.
+The deployed shape is the inverse — each trustee is its own process, holds only
+its own share, and reaches the others solely through the relay. `client` drives
+one `Party` in that shape.
+
+The difference is who sees the queues. A coordinator can `pump` every party's
+inbox and advance the whole committee to quiescence. A standalone client can see
+only its own inbox, so it:
+
+1. posts its round-1 messages,
+2. **polls** its own inbox, dispatching with the same `coordinator::dispatch`
+   rules, until it holds enough peer messages (`wait_until`),
+3. posts its round-2 messages.
+
+`wait_until` takes a predicate over the party (e.g. "I hold `participants.len()`
+commitments") and a timeout. On timeout it returns `Error::Stalled`, so a
+missing trustee is an explicit failure rather than a hang. The party accessors
+`dkg_round1_count`, `dkg_round2_count`, `signing_commitment_count`, and
+`signature_share_count` exist precisely to be those predicates; they read only
+public progress, never secret material.
+
+```rust
+pub fn run_dkg_party(...) -> Result<Vec<u8>>          // returns the group key
+pub fn run_signing_party(...) -> Result<Option<Vec<u8>>> // Some(sig) for the aggregator
+```
+
+Exactly one signer is the aggregator (`--aggregate`). It is the only party that
+must stay until every signature share has landed; the others can exit as soon as
+their round-2 `send` returns, because the relay has accepted the envelope before
+the HTTP call completes.
+
+Because each process is independent, a share must survive between runs. That is
+`persistence`: `Party::export_share(committee, threshold)` writes a
+`TrusteeShare` holding the serialized `KeyPackage`, the `PublicKeyPackage`, the
+roster, the threshold, and the group key as a checksum;
+`Party::from_share(&share)` reconstructs the party and refuses the file if the
+embedded group key disagrees with the recorded one. The file contains secret
+material and must be kept secret.
+
 ---
 
 ## 6. Transport layer
@@ -438,6 +485,32 @@ asked to participate, and `aggregate` only ever looks at the participants
 listed in the request. Non-participants hold no key material of value beyond
 what they already had.
 
+### 7.3 The same signing, with each trustee in its own process
+
+```
+terminal 1..5 (one per trustee)                  relay
+────────────────────────────────────────────────────────────────
+setup (once):  dkg-party --index i --out share-i.json
+    i posts dkg_round1 broadcast
+    i polls inbox until it has 4 round-1 packages
+    i posts 4 point-to-point dkg_round2 packages
+    i polls inbox until it has 4 round-2 packages
+    i finalizes and writes share-i.json   <- only i ever sees this file
+signing:  sign-party --index i --share share-i.json --participants 1,2,3
+    i loads share-i.json into a Party (no other share is on disk)
+    1,2,3 post signing_round1 broadcasts
+    each polls until it holds 3 commitments
+    1,2,3 post signing_round2 broadcasts
+    1 (--aggregate) polls until it holds 3 shares, then aggregates + verifies
+    2,3 exit as soon as their share is accepted by the relay
+```
+
+The wire traffic and the crypto are identical to §7.2; only *who runs which
+`Party`* changes. The relay remains the sole shared component and still verifies
+nothing about the contents. The threshold property is now visible at the
+process level: stopping any two of trustees 1–3 leaves the third polling its
+inbox and eventually failing with `Stalled`, with no signature produced.
+
 ---
 
 ## 8. Threat model and honest limitations
@@ -462,14 +535,18 @@ deployment concerns rather than protocol flaws):
    but this build does not encrypt point-to-point traffic. A wire sniffer could
    capture DKG round-2 packages. TLS (or a separately authenticated channel for
    the secret packages) is a deployment requirement, not a code one.
-2. **No persistence.** Key packages and group keys live in memory only. There
-   is no at-rest encryption, no backup of shares, no "lost a trustee" recovery
-   beyond running a fresh DKG. Reality needs each trustee's share to survive a
-   reboot.
-3. **One coordinator process.** The CLI and tests run every `Party` in one
-   process. The protocol treats them as independent actors and the relay makes
-   the transport genuinely shared, so the seams are real — but this is not yet
-   five processes on five machines.
+2. **Persistence is plaintext and unencrypted.** `persistence` writes a
+   `TrusteeShare` to a JSON file so a trustee can survive a reboot, and the
+   `dkg-party` / `sign-party` commands use it. There is no at-rest encryption and
+   no "lost a trustee" recovery beyond a fresh DKG. The share file is secret and
+   must be protected as such.
+3. **Per-trustee mode exists; one DKG shortcut still centralizes briefly.**
+   `dkg-party` runs each trustee in its own process and writes only that
+   trustee's share, and `sign-party` loads only that trustee's share. The
+   `dkg --out-dir` shortcut runs the whole ceremony in one process (which
+   therefore *sees* every share while minting them) and is a
+   testing/bootstrapping convenience, not the deployed shape. No coordinator
+   appears in the `*-party` path.
 4. **Two-thirds honest assumption is not modeled.** FROST's security assumes a
    *threshold number of honest participants*. Nothing here defends against a
    dishonest participant refusing to sign or broadcasting garbage — that is a
@@ -494,6 +571,10 @@ frost-service sign   [options]      run two-round threshold signing
 frost-service matrix [options]      sweep n-of-m and sub-threshold subsets
 frost-service --help
 
+per-trustee (each trustee is its own process, talking through --relay):
+frost-service dkg-party  --index N --relay URL --out FILE    [options]
+frost-service sign-party --index N --share FILE --relay URL  [options]
+
 --trustees N        committee size                     (default 5)
 --threshold T       signing threshold                  (default 3)
 --session HEX       32-byte session id                 (default: random)
@@ -502,6 +583,12 @@ frost-service --help
 --message HEX       payload to sign                    (default: the attestation string)
 --participants L    comma-separated trustee indices    (default: 1..T)
 --expect-failure    require rejection, report why
+--index N           this trustee's index (party commands)
+--share FILE        trustee share to load (sign-party)
+--out FILE          write this trustee's share here (dkg-party)
+--out-dir DIR       with dkg: write share-N.json per trustee
+--aggregate         this trustee combines the signature shares (sign-party)
+--timeout-ms N      peer wait budget for party commands   (default 30000)
 ```
 
 Every subcommand prints **one** JSON document on stdout — nothing else — and
@@ -522,6 +609,14 @@ standalone viewpoint.
   `--participants`, embedding both the DKG summary and `SigningOutcome` in the
   JSON. The signature is a 65-byte secp256k1 compact signature (130 hex chars),
   and `verified_against_group_key` is set by actually verifying it.
+- **`dkg-party`** — one trustee's DKG leg. Requires `--index N`, `--relay URL`,
+  and `--out FILE`; writes only that trustee's share and prints its group key.
+  Every trustee must run it concurrently under the same `--session`.
+- **`sign-party`** — one trustee's signing leg. Requires `--index N`,
+  `--share FILE`, and `--relay URL`; loads only that share. Exactly one
+  participant should pass `--aggregate`; it prints `role: "aggregator"` and the
+  `signature`, while the others print `role: "participant"`. The share's recorded
+  threshold is used, not `--threshold`.
 - **`matrix`** — the proof sweep. For committees 2, 3, and N, and every
   threshold `2..=m`, three cases each: at-threshold signs, above-threshold
   signs, below-threshold is rejected. Each signing run gets a fresh session
@@ -534,6 +629,31 @@ Full relay run:
 frost-relay --listen 127.0.0.1:8477 --trustees 5     # terminal 1
 frost-service sign --relay http://127.0.0.1:8477 \
                    --participants 2,3,5 --message 0xdeadbeef
+```
+
+Fully distributed run (one process per trustee; `SESSION` shared by all):
+
+```sh
+frost-relay --listen 127.0.0.1:8477 --trustees 5     # terminal 1
+export SESSION=$(openssl rand -hex 32)
+
+# terminals 2..6 — distributed DKG, each writes only its own share
+for i in 1 2 3 4 5; do
+  frost-service dkg-party --index $i --trustees 5 --threshold 3 \
+    --session $SESSION --relay http://127.0.0.1:8477 \
+    --out share-$i.json &
+done; wait
+
+# terminals — 3 of the 5 sign; trustee 1 aggregates
+export SIGSESSION=$(openssl rand -hex 32)
+frost-service sign-party --index 1 --share share-1.json \
+  --participants 1,2,3 --session $SIGSESSION \
+  --relay http://127.0.0.1:8477 --aggregate &
+frost-service sign-party --index 2 --share share-2.json \
+  --participants 1,2,3 --session $SIGSESSION --relay http://127.0.0.1:8477 &
+frost-service sign-party --index 3 --share share-3.json \
+  --participants 1,2,3 --session $SIGSESSION --relay http://127.0.0.1:8477 &
+wait
 ```
 
 ---
@@ -556,9 +676,9 @@ happen.
 
 ## 11. Tests
 
-41 tests, two layers.
+46 tests, three layers.
 
-**25 unit tests** in the modules they exercise:
+**28 unit tests** in the modules they exercise:
 
 - `wire`: each session/domain/payload binding changes the signed bytes; the
   signing message is stable; envelopes reject foreign sessions, wrong
@@ -569,6 +689,9 @@ happen.
   survive the trip.
 - `party`: index 0 refused, off-committee trustees refused, signing before a
   DKG is refused.
+- `client`: `wait_until` returns immediately once its predicate already holds.
+- `vdf`: Fiat–Shamir challenge encoding and Pietrzak proof round-trips across
+  many values of `T` (see `docs/VDF_Structure.md`).
 
 **16 integration tests** in `tests/protocol.rs`, which actually run complete
 multi-party sessions and check the *claims*, not just the happy path:
@@ -592,6 +715,14 @@ multi-party sessions and check the *claims*, not just the happy path:
 | `a_relay_can_be_reset_between_sessions` | two independent sessions, reset in between |
 | `in_process_and_relay_transports_agree_on_the_outcome` | same protocol over memory and relay |
 
+**2 per-trustee tests** in `tests/per_trustee.rs`, which make the trust boundary
+real by running each `Party` in its own thread or process:
+
+| Test | What it proves |
+| --- | --- |
+| `separate_trustee_processes_complete_dkg_and_signing` | a live relay, five concurrent trustee clients through DKG, each share persisted and reloaded, then 3 of them sign (one aggregator) and the result is verified independently with `frost` against the group key |
+| `cli_party_commands_run_distributed_dkg_and_signing` | the actual `dkg-party` / `sign-party` subcommands run as child processes and emit a verifying signature |
+
 `frost-service matrix` re-runs the n-of-m sweep from the CLI and reports the
 same verdicts, so the proof is reproducible by hand.
 
@@ -600,7 +731,7 @@ same verdicts, so the proof is reproducible by hand.
 ## 12. Building and verifying
 
 ```sh
-# Rust half: 41 tests, clippy, format
+# Rust half: 46 tests, clippy, format
 cargo test     --manifest-path rust/frost-service/Cargo.toml
 cargo clippy   --manifest-path rust/frost-service/Cargo.toml --all-targets
 cargo fmt      --manifest-path rust/frost-service/Cargo.toml --check

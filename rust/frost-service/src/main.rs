@@ -1,23 +1,27 @@
 use std::process::ExitCode;
+use std::time::Duration;
 
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
 
+use frost_service::client;
 use frost_service::coordinator::{self, SigningOutcome, SigningRequest};
 use frost_service::error::{Error, Result};
+use frost_service::party::Party;
+use frost_service::persistence;
 use frost_service::report::{
     self, BelowThresholdReport, DkgReport, SelftestReport, SignatureReport,
 };
 use frost_service::transport::{http::HttpTransport, memory::MemoryTransport, Transport};
 use frost_service::wire::{SessionId, SIGNING_DOMAIN};
 
-
-
 const MAX_SIGNERS: u16 = 5;
 const MIN_SIGNERS: u16 = 3;
 /// FROST's DKG refuses a single-signer key, so 2 is the floor for a threshold.
 const MIN_THRESHOLD: u16 = 2;
 const MESSAGE: &[u8] = b"inheritance-release-attestation";
+/// Default patience for a standalone trustee waiting on its peers.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 const USAGE: &str = "\
 frost-service: FROST (secp256k1) threshold signing for the inheritance vault
@@ -31,6 +35,10 @@ usage:
   frost-service attest [options]      create a death attestation
   frost-service --help
 
+per-trustee (each trustee is its own process, talking through --relay):
+  frost-service dkg-party  --index N --relay URL --out FILE   [options]
+  frost-service sign-party --index N --share FILE --relay URL [options]
+
 options:
   --trustees N        committee size                     (default 5)
   --threshold T       signing threshold                  (default 3)
@@ -40,6 +48,12 @@ options:
   --message HEX       payload to sign                    (default: attestation string)
   --participants L    comma-separated trustee indices    (default: 1..T)
   --expect-failure    require rejection, report the reason
+  --index N           this trustee's index (party commands)
+  --share FILE        trustee share to load (sign-party)
+  --out FILE          write this trustee's share here (dkg-party)
+  --out-dir DIR       with dkg: write share-N.json per trustee
+  --aggregate         this trustee combines the signature shares (sign-party)
+  --timeout-ms N      peer wait budget for party commands   (default 30000)
 
 Every subcommand writes one JSON document to stdout. A rejected run exits
 non-zero, so a caller never sees a failure parsed as a success.
@@ -51,7 +65,9 @@ fn main() -> ExitCode {
     let outcome: Result<serde_json::Value> = match args.first().map(String::as_str) {
         None | Some("selftest") => selftest().map(|r| json!(r)),
         Some("dkg") => cmd_dkg(&args[1..]),
+        Some("dkg-party") => cmd_dkg_party(&args[1..]),
         Some("sign") => cmd_sign(&args[1..]),
+        Some("sign-party") => cmd_sign_party(&args[1..]),
         Some("matrix") => cmd_matrix(&args[1..]),
         Some("vdf") => cmd_vdf(&args[1..]),
         Some("attest") => cmd_attest(&args[1..]),
@@ -144,6 +160,18 @@ struct Options {
     message: Vec<u8>,
     participants: Vec<u16>,
     expect_failure: bool,
+    /// This trustee's index, for the per-trustee commands.
+    index: Option<u16>,
+    /// Share file to load (`sign-party`).
+    share: Option<String>,
+    /// Share file to write (`dkg-party`).
+    out: Option<String>,
+    /// Directory to write one share per trustee (`dkg --out-dir`).
+    out_dir: Option<String>,
+    /// Whether this trustee aggregates the signature shares (`sign-party`).
+    aggregate: bool,
+    /// Peer wait budget for the standalone client.
+    timeout_ms: u64,
 }
 
 impl Default for Options {
@@ -157,6 +185,12 @@ impl Default for Options {
             message: MESSAGE.to_vec(),
             participants: Vec::new(),
             expect_failure: false,
+            index: None,
+            share: None,
+            out: None,
+            out_dir: None,
+            aggregate: false,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
         }
     }
 }
@@ -174,6 +208,9 @@ fn parse_options(args: &[String]) -> Result<Options> {
                 .ok_or_else(|| Error::BadArgument(format!("{flag} needs a value")))
         };
 
+        // Flags that take no value, so the cursor advances by one.
+        let valueless = matches!(flag, "--expect-failure" | "--aggregate");
+
         match flag {
             "--trustees" => options.trustees = next(i)?.parse().map_err(bad_number)?,
             "--threshold" => options.threshold = next(i)?.parse().map_err(bad_number)?,
@@ -186,10 +223,16 @@ fn parse_options(args: &[String]) -> Result<Options> {
                 participants_set = true;
             }
             "--expect-failure" => options.expect_failure = true,
+            "--index" => options.index = Some(next(i)?.parse().map_err(bad_number)?),
+            "--share" => options.share = Some(next(i)?),
+            "--out" => options.out = Some(next(i)?),
+            "--out-dir" => options.out_dir = Some(next(i)?),
+            "--aggregate" => options.aggregate = true,
+            "--timeout-ms" => options.timeout_ms = next(i)?.parse().map_err(bad_number)?,
             other => return Err(Error::BadArgument(format!("unknown flag `{other}`"))),
         }
 
-        i += if flag == "--expect-failure" { 1 } else { 2 };
+        i += if valueless { 1 } else { 2 };
     }
 
     if options.threshold < MIN_THRESHOLD || options.threshold > options.trustees {
@@ -221,7 +264,6 @@ fn parse_hex(raw: &str, flag: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::Malformed(format!("{flag} is not hex: {e}")))
 }
 
-
 fn parse_session(raw: &str) -> Result<SessionId> {
     let bytes = parse_hex(raw, "--session")?;
     if bytes.len() != 32 {
@@ -252,9 +294,24 @@ fn transport_for(options: &Options) -> Box<dyn Transport> {
     }
 }
 
+/// Party commands only make sense across processes, so a relay is mandatory.
+fn require_relay(options: &Options) -> Result<Box<dyn Transport>> {
+    match &options.relay {
+        Some(url) => Ok(Box::new(HttpTransport::new(url.clone()))),
+        None => Err(Error::BadArgument(
+            "this command needs --relay URL so the trustees can reach each other".to_string(),
+        )),
+    }
+}
+
+fn party_timeout(options: &Options) -> Duration {
+    Duration::from_millis(options.timeout_ms)
+}
+
 fn cmd_dkg(args: &[String]) -> Result<serde_json::Value> {
     let options = parse_options(args)?;
     let mut rng = OsRng;
+    let committee = coordinator::committee(options.trustees);
     let mut parties = coordinator::new_committee(options.trustees)?;
     let mut transport = transport_for(&options);
 
@@ -267,7 +324,22 @@ fn cmd_dkg(args: &[String]) -> Result<serde_json::Value> {
     );
 
     match outcome {
-        Ok(dkg) if !options.expect_failure => Ok(json!(dkg)),
+        Ok(dkg) if !options.expect_failure => {
+            // Optionally split the freshly minted shares into one file per
+            // trustee. This is a bootstrapping convenience: a real ceremony
+            // would have each trustee generate and keep its own share.
+            if let Some(dir) = &options.out_dir {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    Error::Serde(format!("cannot create share directory {dir}: {e}"))
+                })?;
+                for party in &parties {
+                    let share = party.export_share(&committee, options.threshold)?;
+                    let path = format!("{dir}/share-{}.json", party.me());
+                    persistence::save_trustee_share(&share, &path)?;
+                }
+            }
+            Ok(json!(dkg))
+        }
         Ok(_) => Err(Error::BadArgument(
             "DKG unexpectedly succeeded under --expect-failure".to_string(),
         )),
@@ -276,6 +348,120 @@ fn cmd_dkg(args: &[String]) -> Result<serde_json::Value> {
             "error": e.to_string(),
         })),
         Err(e) => Err(e),
+    }
+}
+
+/// One trustee's leg of the distributed DKG. Run one process per trustee with
+/// the same `--session` and `--relay`; each writes only its own share.
+fn cmd_dkg_party(args: &[String]) -> Result<serde_json::Value> {
+    let options = parse_options(args)?;
+    let index = options
+        .index
+        .ok_or_else(|| Error::BadArgument("dkg-party requires --index N".to_string()))?;
+    let out = options
+        .out
+        .clone()
+        .ok_or_else(|| Error::BadArgument("dkg-party requires --out FILE".to_string()))?;
+
+    let committee = coordinator::committee(options.trustees);
+    let mut party = Party::new(index, &committee)?;
+    let mut transport = require_relay(&options)?;
+    let mut rng = OsRng;
+
+    let group_key = client::run_dkg_party(
+        &mut party,
+        transport.as_mut(),
+        options.session,
+        options.threshold,
+        options.trustees,
+        party_timeout(&options),
+        &mut rng,
+    )?;
+
+    let share = party.export_share(&committee, options.threshold)?;
+    persistence::save_trustee_share(&share, &out)?;
+
+    Ok(json!({
+        "status": "ok",
+        "role": "dkg-participant",
+        "trustee": index,
+        "trustees": options.trustees,
+        "threshold": options.threshold,
+        "session": hex::encode(options.session),
+        "group_verifying_key": hex::encode(group_key),
+        "share_file": out,
+        "transport": "relay",
+    }))
+}
+
+/// One trustee's leg of threshold signing. Each process loads only its own
+/// share; exactly one should pass `--aggregate` to combine the partials.
+fn cmd_sign_party(args: &[String]) -> Result<serde_json::Value> {
+    let options = parse_options(args)?;
+    let index = options
+        .index
+        .ok_or_else(|| Error::BadArgument("sign-party requires --index N".to_string()))?;
+    let share_file = options
+        .share
+        .clone()
+        .ok_or_else(|| Error::BadArgument("sign-party requires --share FILE".to_string()))?;
+
+    let share = persistence::load_trustee_share(&share_file)?;
+    if share.trustee_id != index {
+        return Err(Error::BadArgument(format!(
+            "share file is for trustee {} but --index is {index}",
+            share.trustee_id
+        )));
+    }
+    let threshold = share.threshold;
+    if !options.participants.contains(&index) {
+        return Err(Error::BadArgument(format!(
+            "trustee {index} is not among --participants {:?}",
+            options.participants
+        )));
+    }
+
+    let group_verifying_key = share.group_verifying_key.clone();
+    let mut party = Party::from_share(&share)?;
+    let mut transport = require_relay(&options)?;
+    let mut rng = OsRng;
+
+    let signature = client::run_signing_party(
+        &mut party,
+        transport.as_mut(),
+        options.session,
+        threshold,
+        &options.participants,
+        &options.message,
+        &options.domain,
+        options.aggregate,
+        party_timeout(&options),
+        &mut rng,
+    )?;
+
+    match signature {
+        Some(bytes) => Ok(json!({
+            "status": "ok",
+            "role": "aggregator",
+            "trustee": index,
+            "session": hex::encode(options.session),
+            "participants": options.participants,
+            "threshold": threshold,
+            "group_verifying_key": group_verifying_key,
+            "message": hex::encode(&options.message),
+            "signature": hex::encode(bytes),
+            "transport": "relay",
+        })),
+        None => Ok(json!({
+            "status": "ok",
+            "role": "participant",
+            "trustee": index,
+            "session": hex::encode(options.session),
+            "participants": options.participants,
+            "threshold": threshold,
+            "group_verifying_key": group_verifying_key,
+            "transport": "relay",
+        })),
     }
 }
 
@@ -491,7 +677,7 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
     let mut x_str: Option<String> = None;
     let mut y_str: Option<String> = None;
     let mut proof_strs: Vec<String> = Vec::new();
-    
+
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -501,7 +687,9 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
             }
             "--t" => {
                 if i + 1 < args.len() {
-                    t = args[i + 1].parse().map_err(|e| Error::BadArgument(format!("bad t: {e}")))?;
+                    t = args[i + 1]
+                        .parse()
+                        .map_err(|e| Error::BadArgument(format!("bad t: {e}")))?;
                     i += 2;
                 } else {
                     return Err(Error::BadArgument("--t needs value".to_string()));
@@ -509,7 +697,9 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
             }
             "--bits" => {
                 if i + 1 < args.len() {
-                    bits = args[i + 1].parse().map_err(|e| Error::BadArgument(format!("bad bits: {e}")))?;
+                    bits = args[i + 1]
+                        .parse()
+                        .map_err(|e| Error::BadArgument(format!("bad bits: {e}")))?;
                     i += 2;
                 } else {
                     return Err(Error::BadArgument("--bits needs value".to_string()));
@@ -556,12 +746,20 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
             }
         }
     }
-    
+
     if verify {
         if let (Some(xs), Some(ys)) = (x_str, y_str) {
             use num_bigint::BigUint;
-            let x: BigUint = xs.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(xs.trim_start_matches("0x")).unwrap_or_default()));
-            let y: BigUint = ys.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(ys.trim_start_matches("0x")).unwrap_or_default()));
+            let x: BigUint = xs.parse().unwrap_or_else(|_| {
+                BigUint::from_bytes_be(
+                    &hex::decode(xs.trim_start_matches("0x")).unwrap_or_default(),
+                )
+            });
+            let y: BigUint = ys.parse().unwrap_or_else(|_| {
+                BigUint::from_bytes_be(
+                    &hex::decode(ys.trim_start_matches("0x")).unwrap_or_default(),
+                )
+            });
             let mut proof: Vec<BigUint> = Vec::new();
             for p in &proof_strs {
                 if let Ok(b) = hex::decode(p.trim_start_matches("0x")) {
@@ -577,7 +775,7 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
             }));
         }
     }
-    
+
     // Compute mode
     use num_bigint::BigUint;
     let mut rng = OsRng;
@@ -585,7 +783,10 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
     let clean_input = input_hex.trim_start_matches("0x");
     let input_bytes = hex::decode(clean_input).unwrap_or_else(|_| input_hex.as_bytes().to_vec());
     let x = BigUint::from_bytes_be(&input_bytes);
-    let res = frost_service::vdf::compute_vdf_with_proof(&x, &frost_service::vdf::VDFParams { n: n.clone(), t });
+    let res = frost_service::vdf::compute_vdf_with_proof(
+        &x,
+        &frost_service::vdf::VDFParams { n: n.clone(), t },
+    );
     Ok(json!({
         "x": x.to_str_radix(16),
         "y": res.y.to_str_radix(16),

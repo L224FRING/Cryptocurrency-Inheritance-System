@@ -23,7 +23,7 @@
 
 ## 4. Rust/Off-Chain Enhancements
 - [x] **Add VDF selftest command** - VDF selftest added and working
-- [x] **Key share persistence** - Basic persistence module added for trustee shares
+- [x] **Key share persistence** - `TrusteeShare` files are written and loaded by `dkg-party` / `sign-party`, so each trustee process holds only its own share (no at-rest encryption yet)
 - [x] **Attestation flow** - Basic attest command added
 - [ ] **Relay production hardening** - Add TLS/auth for relay if used in production (currently plaintext HTTP)
 - [x] **Better error handling** - Enhanced error types exist; core errors covered
@@ -44,7 +44,7 @@
 
 ## 7. User Experience
 - [x] **CLI polish** - Help text includes all commands
-- [x] **Trustee coordination** - Relay and transport infrastructure complete
+- [x] **Trustee coordination** - Relay, transport, and a per-trustee client (`dkg-party` / `sign-party`) so each trustee runs as its own process instead of one simulation
 - [x] **Monitoring/notifications** - Structure in place, documented in journey
 - [x] **Recovery flows** - Documented in operational context
 
@@ -52,4 +52,4 @@
 - **High priority**: FROST on-chain signature verification (core cryptographic integration)
 - **High priority**: Connect InheritanceVault to require both VDF + FROST conditions
 - **Medium priority**: Fix VDF proof generation for full multi-round Pietrzak
-- **Low priority**: Production hardening (TLS, persistence) for MVP/demo
+- **Low priority**: Production hardening (TLS for the relay, encrypted share storage) for MVP/demo

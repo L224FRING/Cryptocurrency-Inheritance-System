@@ -104,7 +104,13 @@ fn generate_proof(x: &BigUint, y: &BigUint, t: u64, n: &BigUint, proof_list: &mu
     }
 }
 
-pub fn verify_vdf_pietrzak(x: &BigUint, y: &BigUint, proof: &[BigUint], t: u64, n: &BigUint) -> bool {
+pub fn verify_vdf_pietrzak(
+    x: &BigUint,
+    y: &BigUint,
+    proof: &[BigUint],
+    t: u64,
+    n: &BigUint,
+) -> bool {
     if t == 0 {
         return x == y;
     }
@@ -195,4 +201,3 @@ mod tests {
         }
     }
 }
-

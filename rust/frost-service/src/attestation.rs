@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
+use crate::report::{BelowThresholdReport, DkgReport, SelftestReport, SignatureReport};
 use crate::wire::{SessionId, SIGNING_DOMAIN};
-use crate::report::{SelftestReport, DkgReport, SignatureReport, BelowThresholdReport};
 use serde_json::json;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

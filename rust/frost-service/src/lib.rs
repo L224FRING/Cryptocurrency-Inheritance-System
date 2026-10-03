@@ -9,11 +9,15 @@
 //!   so nothing from a previous session can be replayed into a new one.
 //! - [`transport`] carries messages between parties. The relay is untrusted and
 //!   verifies nothing; correctness rests on FROST's own package verification.
-//! - [`coordinator`] drives a session by pumping envelopes until quiet.
+//! - [`coordinator`] drives a session by pumping envelopes until quiet, for the
+//!   in-process case where every party lives in one program.
+//! - [`client`] drives one party across a relay, for the deployed case where
+//!   each trustee runs its own process and holds only its own share.
 //!
 //! Setup is a three-part DKG over the full committee. Signing is the two-round
 //! FROST protocol over any subset of at least the threshold size.
 
+pub mod client;
 pub mod coordinator;
 pub mod error;
 pub mod party;
@@ -30,6 +34,9 @@ pub use frost_secp256k1;
 pub use rand_core;
 
 pub mod vdf;
-pub use vdf::{VDFParams, VDFProof, VDFResult, compute_vdf, compute_vdf_with_proof, verify_vdf_pietrzak, generate_rsa_modulus};
-pub mod persistence;
+pub use vdf::{
+    compute_vdf, compute_vdf_with_proof, generate_rsa_modulus, verify_vdf_pietrzak, VDFParams,
+    VDFProof, VDFResult,
+};
 pub mod attestation;
+pub mod persistence;

@@ -67,7 +67,10 @@ fn pump(parties: &mut [Party], transport: &mut (impl Transport + ?Sized)) -> Res
     Ok(moved)
 }
 
-fn dispatch(party: &mut Party, envelope: Envelope) -> Result<()> {
+/// Apply one envelope to a party. Public so the per-trustee client can feed a
+/// standalone party from its own relay inbox using the same rules the
+/// in-process coordinator uses.
+pub fn dispatch(party: &mut Party, envelope: Envelope) -> Result<()> {
     match envelope.kind {
         MessageKind::DkgRound1 => party.accept_dkg_round1(&envelope),
         MessageKind::DkgRound2 => party.accept_dkg_round2(&envelope),

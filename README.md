@@ -24,7 +24,7 @@ test/                     Foundry tests
 lib/forge-std/            Foundry test library
 rust/frost-service/       off-chain FROST crate (frost-core 3.0)
   src/lib.rs              protocol core: party, wire, transport, coordinator
-  src/main.rs             frost-service CLI (selftest, dkg, sign, matrix)
+  src/main.rs             frost-service CLI (selftest, dkg, sign, matrix, dkg-party, sign-party)
   src/bin/relay.rs        frost-relay, the untrusted message relay
   tests/protocol.rs       n-of-m, sub-threshold, replay, live-relay tests
 ```
@@ -50,7 +50,7 @@ Verified versions:
 
 ```sh
 cargo build --manifest-path rust/frost-service/Cargo.toml   # FROST binaries
-cargo test  --manifest-path rust/frost-service/Cargo.toml   # 41 Rust tests
+cargo test  --manifest-path rust/frost-service/Cargo.toml   # 46 Rust tests
 forge test                                                  # both Solidity suites
 ```
 
@@ -111,7 +111,9 @@ Split into a protocol core and the things that move bytes for it:
 | `party` | one trustee. Holds only its own key share, never the group secret. |
 | `wire` | message format. Every message is bound to a 32-byte session id. |
 | `transport` | carries messages. `memory` in-process, `http` over a relay. |
-| `coordinator` | drives a session by pumping envelopes until quiet. |
+| `coordinator` | drives a whole session in one process, pumping envelopes until quiet. |
+| `client` | drives one trustee across a relay — the per-trustee, multi-process mode. |
+| `persistence` | writes/loads a `TrusteeShare` so a trustee survives a reboot. |
 | `error` / `report` | one error type, one JSON report shape. |
 
 No Shamir-style reconstruction is involved: the group secret is never assembled,
@@ -127,8 +129,24 @@ frost-service matrix                    # sweep n-of-m and sub-threshold subsets
 frost-relay --listen 127.0.0.1:8477     # untrusted message relay
 ```
 
+Per-trustee (each trustee its own process, `--relay` required):
+
+```sh
+# one process per trustee; each writes only its own share
+for i in 1 2 3 4 5; do
+  frost-service dkg-party --index $i --trustees 5 --threshold 3 \
+    --session $SESSION --relay http://127.0.0.1:8477 --out share-$i.json &
+done; wait
+
+# 3 of the 5 sign; trustee 1 aggregates into one signature
+frost-service sign-party --index 1 --share share-1.json \
+  --participants 1,2,3 --session $SIGSESSION \
+  --relay http://127.0.0.1:8477 --aggregate
+```
+
 `--trustees`, `--threshold`, `--session`, `--domain`, `--relay`, `--message`,
-`--participants`, `--expect-failure`. `frost-service --help` lists them.
+`--participants`, `--expect-failure`, `--index`, `--share`, `--out`, `--out-dir`,
+`--aggregate`, `--timeout-ms`. `frost-service --help` lists them.
 
 Every subcommand writes one JSON document to stdout and nothing else. Exit code is
 0 on success, non-zero on failure, so a caller can never mistake a partial report
@@ -147,6 +165,20 @@ from FROST's own package verification, not from trusting the transport.
 frost-relay --listen 127.0.0.1:8477 --trustees 5   # terminal 1
 frost-service sign --relay http://127.0.0.1:8477    # terminal 2
 ```
+
+### Per-trustee mode (real separation of duties)
+
+The `coordinator`-based commands run every `Party` in one process, which is fine
+for tests but puts all shares in one place. `dkg-party` / `sign-party` are the
+deployed shape: one OS process per trustee, each loading only its own
+`TrusteeShare` file and reaching the others solely through the relay. The
+coordinator never holds a share. A missing trustee makes the others time out
+with `Stalled` rather than hang, and two of three signers cannot produce a
+signature no matter how long they wait.
+
+`dkg --out-dir DIR` is a shortcut that runs the whole ceremony in one process and
+writes one share per trustee; use it to bootstrap a demo quickly, not as the
+trust story.
 
 ### Session ids are single-use
 
@@ -171,6 +203,9 @@ sets recorded, because reusing a nonce pair across two messages leaks a key shar
 - A signature binds only to its own session, domain, and payload.
 - Session reuse, duplicate commitments, duplicate shares, and nonce reuse are refused.
 - The full protocol runs over a real relay process, and reset leaves no state behind.
+- In `tests/per_trustee.rs`, five concurrent trustee clients complete DKG over a
+  live relay with each share persisted and reloaded, and the real `dkg-party` /
+  `sign-party` subcommands produce a signature that verifies.
 
 `frost-service matrix` runs the same n-of-m sweep from the CLI and reports
 `passed`/`failed` per case.

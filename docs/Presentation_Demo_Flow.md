@@ -57,29 +57,44 @@ cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 ./rust/frost-service/target/debug/frost-relay --listen 127.0.0.1:8477 --trustees 5
 ```
 
-### Terminal 2: Run DKG Ceremony (Owner Orchestrates)
+### Terminal 2: Distributed DKG — each trustee is its own process
 
-Simulate 5 trustees doing 3-of-5 DKG. In reality, each trustee runs their own client.
+Each trustee runs its own client, reads and writes only its own share file, and
+talks to the relay. Five processes, five shares.
 
 ```bash
 cd /Users/somamacbook/Cryptocurrency-Inheritance-System
-./rust/frost-service/target/debug/frost-service dkg \
-  --relay http://127.0.0.1:8477 \
-  --trustees 5 \
-  --threshold 3
+export RELAY=http://127.0.0.1:8477
+export SESSION=$(python3 -c "import os;print(os.urandom(32).hex())")
+mkdir -p /tmp/shares
+
+for i in 1 2 3 4 5; do
+  ./rust/frost-service/target/debug/frost-service dkg-party \
+    --index $i --trustees 5 --threshold 3 \
+    --session $SESSION --relay $RELAY \
+    --out /tmp/shares/share-$i.json &
+done
+wait
+
+# Every trustee must have derived the same group key.
+for i in 1 2 3 4 5; do
+  python3 -c "import json;print(json.load(open('/tmp/shares/share-$i.json'))['group_verifying_key'])"
+done
 ```
 
-**Save the result.** Copy `group_verifying_key` from output.
+**Point to highlight:** every line is a separate OS process holding only its own
+secret share. The relay is the only thing they share, and it sees ciphertext-like
+envelopes, never secrets.
 
-Example:
-```json
-{
-  "group_verifying_key": "02e49d08a3d768f9016c10522821b8eb2d0fb0f965b13256ec8044c3c4368c0351",
-  "status": "ok"
-}
+> **Shortcut (less impressive, used in tests):** `dkg --out-dir /tmp/shares`
+> runs the whole ceremony in one process and writes one file per trustee.
+
+**Key point:** At the end, each trustee has their own secret share (its file).
+The owner holds only the group public key.
+
+```bash
+export GROUP_PUBKEY=$(python3 -c "import json;print(json.load(open('/tmp/shares/share-1.json'))['group_verifying_key'])")
 ```
-
-**Key point:** At the end, each trustee has their own secret share. The owner holds only the group public key.
 
 ---
 
@@ -105,7 +120,8 @@ export OWNER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 export BENEFICIARY=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 # Anvil's first account private key (used for signing txs)
 export ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-export GROUP_PUBKEY="02e49d08a3d768f9016c10522821b8eb2d0fb0f965b13256ec8044c3c4368c0351"
+# The group key produced by the distributed DKG in Terminal 2.
+export GROUP_PUBKEY=$(python3 -c "import json;print(json.load(open('/tmp/shares/share-1.json'))['group_verifying_key'])")
 
 # Deploy full stack (VDFVerifier + FROSTVerifier + InheritanceVault)
 forge script script/DeployFull.s.sol \
@@ -259,34 +275,58 @@ attest. Only if they conclude death/incapacity do they proceed.
 **Point to highlight:** this represents the trustee's own real-world diligence.
 The protocol cannot replace human judgment.
 
-### Step 7b: Trustees produce a threshold FROST signature
+### Step 7b: Trustees produce a threshold FROST signature (each in its own process)
 
-Once 3 of 5 trustees agree, they run the signing ceremony. The default in-process
-transport runs the full multi-party protocol locally:
+FROST is a **threshold** scheme, not a multisig: there is one group key, and each
+trustee holds a *share* of it. Trustees never hold a personal signing key. Each
+produces a **partial signature** from its own share, and the partials are
+aggregated into a single ordinary Schnorr signature. Fewer than `threshold`
+shares cannot produce one.
+
+Each trustee loads only its own share file from the DKG (Step 2) and runs its own
+process:
 
 ```bash
 cd /Users/somamacbook/Cryptocurrency-Inheritance-System
-./rust/frost-service/target/debug/frost-service sign \
-  --trustees 5 \
-  --threshold 3 \
-  --participants 1,2,3 > /tmp/sign.json
-cat /tmp/sign.json
-```
+export RELAY=http://127.0.0.1:8477
+export SIGSESSION=$(python3 -c "import os;print(os.urandom(32).hex())")
 
-The aggregated signature lives at `.signing.signature` (a 64-byte Schnorr
-signature). Extract it:
+# Trustee 1 is the aggregator: it contributes a partial AND combines the rest.
+./rust/frost-service/target/debug/frost-service sign-party \
+  --index 1 --share /tmp/shares/share-1.json \
+  --participants 1,2,3 --session $SIGSESSION \
+  --relay $RELAY --aggregate > /tmp/sign1.json &
 
-```bash
-SIG=$(python3 -c "import json;print(json.load(sys.stdin)['signing']['signature'])" < /tmp/sign.json)
+# Trustees 2 and 3 each contribute a partial, then exit.
+./rust/frost-service/target/debug/frost-service sign-party \
+  --index 2 --share /tmp/shares/share-2.json \
+  --participants 1,2,3 --session $SIGSESSION --relay $RELAY &
+
+./rust/frost-service/target/debug/frost-service sign-party \
+  --index 3 --share /tmp/shares/share-3.json \
+  --participants 1,2,3 --session $SIGSESSION --relay $RELAY &
+wait
+
+# The single aggregated Schnorr signature (no `.signing.` wrapper here).
+SIG=$(python3 -c "import json;print(json.load(open('/tmp/sign1.json'))['signature'])")
 echo "signature=$SIG"
 ```
 
-> To exercise the network path instead, start the relay in Terminal 1 with
-> `frost-relay --listen 127.0.0.1:8477 --trustees 5`, then add
-> `--relay http://127.0.0.1:8477` to the `sign` command.
+**Point to highlight:** three separate OS processes, three separate secret files.
+Only nonce commitments (public) and partial signatures cross the relay; a share
+never leaves its process. The one aggregate signature is indistinguishable from a
+normal Schnorr signature and does not reveal *which* trustees signed.
 
-**Point to highlight:** each trustee computes a partial signature with their own
-share; only partials are exchanged, and the full private key never exists.
+**Say this out loud (trust model):** the relay is untrusted and sees every
+envelope, but FROST's own package verification rejects anything that does not
+belong to the sender it claims. `sign-party` is a thin wrapper — it never holds a
+share. The remaining assumption is that each share file stays secret; in
+production each trustee generates its own during DKG rather than receiving it.
+
+> **Shortcut (in-process demo):** `frost-service sign --trustees 5 --threshold 3
+> --participants 1,2,3` runs the same protocol with all parties in one process.
+> It is convenient for a quick check but hides the trust boundary, so prefer the
+> `sign-party` form above when the point *is* separation of duties.
 
 ---
 
@@ -333,10 +373,12 @@ Be upfront about these if asked; they are documented limitations, not hidden gap
 - **RSA modulus is a fixed test value.** The deployed `N` is a small demo
   composite. Production needs a properly generated RSA modulus with unknown
   factorization (trusted-setup considerations are in `docs/VDF_Parameters.md`).
-- **Each CLI invocation is self-contained.** The `dkg` and `sign` commands each
-  run their own ceremony, so the group key printed by `dkg` is not the same one
-  the standalone `sign` command signs under. A production client persists shares
-  (see `persistence.rs`) and signs with those exact shares.
+- **The in-process `dkg` / `sign` commands are conveniences.** They run every
+  party in one process, so the group key printed by `dkg` is not the same one a
+  standalone `sign` uses. The deployed shape is `dkg-party` / `sign-party`, where
+  each trustee is a separate process that loads only its own persisted share
+  (`persistence.rs`). Those shares survive across runs, so `sign-party` signs
+  under the exact group key its DKG produced.
 - **T should be chosen to match the real delay.** `T=100` is a fast demo value;
   the contract parameter is what enforces the wall-clock window. VDF proofs now
   verify on-chain exactly (the Rust prover and Solidity verifier share the same
