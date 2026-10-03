@@ -85,9 +85,21 @@ contract VDFVerifier {
         while (curT > 1 && idx < halfwayPoints.length) {
             uint256 mu = halfwayPoints[idx];
             uint256 r = uint256(keccak256(abi.encodePacked(curX, curY, mu, n))) % n;
+
+            // Split the remaining exponent into floor (a) and ceil (b) halves.
+            // mu = x^(2^a), and the statement advances to exponent b. When the
+            // split is uneven (odd t), the y-update must double mu^r.
+            uint256 a = curT / 2;
+            uint256 b = curT - a;
+
+            uint256 muR = modexp(mu, r, n);
+            if (b != a) {
+                muR = mulmod(muR, muR, n);
+            }
+
             curX = mulmod(modexp(curX, r, n), mu, n);
-            curY = mulmod(modexp(mu, r, n), curY, n);
-            curT = curT / 2;
+            curY = mulmod(muR, curY, n);
+            curT = b;
             idx++;
         }
 

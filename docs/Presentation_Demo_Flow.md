@@ -100,17 +100,23 @@ Set variables from previous step.
 ```bash
 cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 
-# Owner address from anvil
+# Anvil's first two deterministic accounts
 export OWNER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 export BENEFICIARY=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+# Anvil's first account private key (used for signing txs)
+export ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 export GROUP_PUBKEY="02e49d08a3d768f9016c10522821b8eb2d0fb0f965b13256ec8044c3c4368c0351"
 
 # Deploy full stack (VDFVerifier + FROSTVerifier + InheritanceVault)
 forge script script/DeployFull.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --broadcast \
-  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+  --private-key $ANVIL_KEY
 ```
+
+> **Note:** `cast` cannot read a private key from just `--from <address>`. With a local
+> Anvil node, use `--unlocked --from <address>` (Anvil keeps the account unlocked),
+> or pass `--private-key $ANVIL_KEY`. All `cast send` commands below use `--unlocked`.
 
 From broadcast output, capture addresses:
 - `FROSTVerifier`
@@ -129,7 +135,7 @@ export VAULT_ADDR=<InheritanceVault address>
 ```bash
 cast send $FROST_ADDR "setGroupPublicKeyCompressed(bytes)" $GROUP_PUBKEY \
   --rpc-url http://127.0.0.1:8545 \
-  --from $OWNER
+  --unlocked --from $OWNER
 ```
 
 **Point to highlight:** The group public key (from distributed DKG) is stored on-chain. No private key is ever deployed.
@@ -142,12 +148,12 @@ cast send $FROST_ADDR "setGroupPublicKeyCompressed(bytes)" $GROUP_PUBKEY \
 # Set beneficiary
 cast send $VAULT_ADDR "setBeneficiary(address)" $BENEFICIARY \
   --rpc-url http://127.0.0.1:8545 \
-  --from $OWNER
+  --unlocked --from $OWNER
 
 # Fund vault with 10 ETH
 cast send $VAULT_ADDR --value 10ether \
   --rpc-url http://127.0.0.1:8545 \
-  --from $OWNER
+  --unlocked --from $OWNER
 
 # Verify
 cast call $VAULT_ADDR "beneficiarySet()(bool)" --rpc-url http://127.0.0.1:8545
@@ -166,7 +172,7 @@ This is what happens while the owner is alive and well.
 # Owner checks in to reset inactivity timer
 cast send $VAULT_ADDR "checkIn()" \
   --rpc-url http://127.0.0.1:8545 \
-  --from $OWNER
+  --unlocked --from $OWNER
 ```
 
 **Point to highlight:** As long as the owner checks in regularly, the VDF timer never completes. No trustee action is ever triggered. This is passive protection.
@@ -177,46 +183,49 @@ You can repeat this to demonstrate it's safe and doesn't move funds.
 
 ## 6. Inactivity Scenario: Compute & Submit VDF Proof
 
-Now simulate owner becoming inactive. Someone computes VDF off-chain to prove time has elapsed.
+Now simulate the owner becoming inactive. The VDF chain-verifier has its own
+challenge (separate from the vault's), so read it from `VDF_ADDR`.
 
-**Get challenge and params:**
+**Get the VDF challenge and params:**
 
 ```bash
-CHALLENGE=$(cast call $VAULT_ADDR "getCurrentChallenge()(bytes32)" --rpc-url http://127.0.0.1:8545 | cut -c3-)
-echo "Challenge: 0x$CHALLENGE"
+CHALLENGE=$(cast call $VDF_ADDR "getCurrentChallenge()(uint256)" --rpc-url http://127.0.0.1:8545 | awk '{print $1}')
+echo "Challenge: $CHALLENGE"
 T_VAL=$(cast call $VDF_ADDR "T()(uint256)" --rpc-url http://127.0.0.1:8545)
-echo "T: $T_VAL"
+DELAY=$(cast call $VDF_ADDR "requiredDelay()(uint256)" --rpc-url http://127.0.0.1:8545)
+echo "T: $T_VAL  requiredDelay: $DELAY"
 ```
 
-**Compute VDF off-chain (Terminal 4):**
+**Compute the VDF off-chain (anyone can run this):**
 
 ```bash
-./rust/frost-service/target/debug/frost-service vdf --t $T_VAL --input 0x$CHALLENGE
+# challenge as hex (no 0x prefix is also accepted)
+CHEX=$(python3 -c "print(hex($CHALLENGE)[2:])")
+./rust/frost-service/target/debug/frost-service vdf --t $T_VAL --input 0x$CHEX > /tmp/vdf.json
+cat /tmp/vdf.json
 ```
 
-Save `y` and all `proof_points`. For a live demo with small T (like 5-10), it's instant. With T=100, it takes time - showing it's truly sequential.
+Extract `y` and the `proof_points` as a Solidity `uint256[]`:
 
 ```bash
-# Example extraction (adjust with actual values)
-export VDF_Y=<y from output>
-export VDF_PROOF='["<p1>","<p2>",...]'
+Y=$(python3 -c "import json;print(int(json.load(open('/tmp/vdf.json'))['y'],16))")
+PROOF=$(python3 -c "import json;d=json.load(open('/tmp/vdf.json'));print('['+','.join(str(int(p,16)) for p in d['proof_points'])+']')")
+echo "y=$Y"; echo "proof=$PROOF"
 ```
 
-**Advance time/blocks to satisfy required delay:**
+**Advance blocks past the required delay** (each `anvil_mine` argument is a hex
+block count; the contract requires `block.number > lastCheckIn + requiredDelay`):
 
 ```bash
-# Mine blocks past required delay
-cast rpc evm_mine --rpc-url http://127.0.0.1:8545
+cast rpc anvil_mine 0x10 --rpc-url http://127.0.0.1:8545
 ```
 
-**Submit proof on-chain (permissionless - anyone can do):**
+**Submit the proof on-chain (permissionless - anyone can do this):**
 
 ```bash
-cast send $VDF_ADDR "submitVDFProof(uint256,uint256[])" \
-  $VDF_Y \
-  $VDF_PROOF \
+cast send $VDF_ADDR "submitVDFProof(uint256,uint256[])" $Y "$PROOF" \
   --rpc-url http://127.0.0.1:8545 \
-  --from $BENEFICIARY  # or any address
+  --unlocked --from $BENEFICIARY   # any account may submit
 ```
 
 **Verify:**
@@ -226,66 +235,71 @@ cast call $VDF_ADDR "isInactivityConfirmed()(bool)" --rpc-url http://127.0.0.1:8
 # returns: true
 ```
 
-**Point to highlight:** VDF proof is self-verifying on-chain. No trusted party needed to submit it. The sequential computation proves real time passed.
+**Point to highlight:** The proof is self-verifying on-chain (Pietrzak VDF checked
+via the `MODEXP` precompile). No trusted party is needed to submit it, and the
+sequential computation is what proves real time passed.
 
-**False alarm demo (optional):** If you check-in again with `cast send $VAULT_ADDR "checkIn()" --from $OWNER` before submitting proof, you reset the timer. This prevents false triggers.
+**False-alarm demo (optional):** Before submitting, call
+`cast send $VAULT_ADDR "checkIn()" --unlocked --from $OWNER` to show the owner
+returning resets the clock so the release never happens.
 
 ---
 
 ## 7. Trustee Perspective: Threshold Signing for Release
 
-Now trustees see inactivity is confirmed and must decide - if death is confirmed, they proceed.
+Trustees observe that inactivity is confirmed and independently decide whether to
+attest. Only if they conclude death/incapacity do they proceed.
 
 ### Step 7a: Trustees attest (off-chain human decision)
-
-Each trustee runs attestation on their own device:
 
 ```bash
 ./rust/frost-service/target/debug/frost-service attest --message "death-confirmed"
 ```
 
-**Point to highlight:** This represents the trustee's independent judgment. The protocol doesn't replace human verification.
+**Point to highlight:** this represents the trustee's own real-world diligence.
+The protocol cannot replace human judgment.
 
-### Step 7b: Trustees produce threshold FROST signature
+### Step 7b: Trustees produce a threshold FROST signature
 
-Once ≥3 trustees agree, they sign. With relay running (Terminal 1), do signing with 3 participants.
+Once 3 of 5 trustees agree, they run the signing ceremony. The default in-process
+transport runs the full multi-party protocol locally:
 
 ```bash
 cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 ./rust/frost-service/target/debug/frost-service sign \
-  --relay http://127.0.0.1:8477 \
   --trustees 5 \
   --threshold 3 \
-  --participants 1,2,3 \
-  --message "inheritance-release"
+  --participants 1,2,3 > /tmp/sign.json
+cat /tmp/sign.json
 ```
 
-Copy the aggregated signature from `signature.value`.
+The aggregated signature lives at `.signing.signature` (a 64-byte Schnorr
+signature). Extract it:
 
-Example:
-```json
-"signature": {
-  "value": "026cf81c...",
-  "verified_against_group_key": true,
-  "shares_aggregated": 3
-}
+```bash
+SIG=$(python3 -c "import json;print(json.load(sys.stdin)['signing']['signature'])" < /tmp/sign.json)
+echo "signature=$SIG"
 ```
 
-**Point to highlight:** Each trustee contributes their partial signature locally. Only partials are exchanged. The full key is never reconstructed at any point.
+> To exercise the network path instead, start the relay in Terminal 1 with
+> `frost-relay --listen 127.0.0.1:8477 --trustees 5`, then add
+> `--relay http://127.0.0.1:8477` to the `sign` command.
+
+**Point to highlight:** each trustee computes a partial signature with their own
+share; only partials are exchanged, and the full private key never exists.
 
 ---
 
 ## 8. Final Release (Submit to Contract)
 
-Anyone submits the aggregated signature. The vault verifies both conditions.
+Anyone may submit the aggregated signature. The vault checks both gates before
+releasing custody.
 
 ```bash
-export SIG="<signature.value from step 7b>"
-
 # Submit release
-cast send $VAULT_ADDR "release(bytes)" $SIG \
+cast send $VAULT_ADDR "release(bytes)" 0x$SIG \
   --rpc-url http://127.0.0.1:8545 \
-  --from $BENEFICIARY
+  --unlocked --from $BENEFICIARY
 ```
 
 **Verify release:**
@@ -294,13 +308,40 @@ cast send $VAULT_ADDR "release(bytes)" $SIG \
 cast call $VAULT_ADDR "isReleased()(bool)" --rpc-url http://127.0.0.1:8545
 # true
 
+cast balance $VAULT_ADDR --rpc-url http://127.0.0.1:8545
+# 0
+
 cast balance $BENEFICIARY --rpc-url http://127.0.0.1:8545
-# Shows increased balance by ~10 ETH
+# increased by the 10 ETH the vault was holding
 ```
 
-**Success!** Both gates passed:
+**Success!** Both gates passed and the vault's assets moved to the beneficiary:
 - ✅ VDF confirmed inactivity (time elapsed, tamper-resistant)
-- ✅ Valid threshold FROST signature (≥3 trustees cooperated)
+- ✅ Threshold signature accepted (threshold trustees cooperated)
+
+---
+
+## Current Scope & Honesty Notes (for Q&A)
+
+Be upfront about these if asked; they are documented limitations, not hidden gaps.
+
+- **On-chain FROST verification is structural.** `FROSTVerifier` enforces that a
+  group key is set, that the signature is well-formed (≥64 bytes), and that each
+  signature is used at most once (replay protection). Full secp256k1 Schnorr
+  verification on-chain (point math, `sG == R + eP`) is a future enhancement;
+  the cryptographic verification is done off-chain by the Rust FROST protocol.
+- **RSA modulus is a fixed test value.** The deployed `N` is a small demo
+  composite. Production needs a properly generated RSA modulus with unknown
+  factorization (trusted-setup considerations are in `docs/VDF_Parameters.md`).
+- **Each CLI invocation is self-contained.** The `dkg` and `sign` commands each
+  run their own ceremony, so the group key printed by `dkg` is not the same one
+  the standalone `sign` command signs under. A production client persists shares
+  (see `persistence.rs`) and signs with those exact shares.
+- **T should be chosen to match the real delay.** `T=100` is a fast demo value;
+  the contract parameter is what enforces the wall-clock window. VDF proofs now
+  verify on-chain exactly (the Rust prover and Solidity verifier share the same
+  `keccak256` Fiat-Shamir derivation over 32-byte big-endian words - see
+  `test/VDFRealProof.t.sol`).
 
 ---
 

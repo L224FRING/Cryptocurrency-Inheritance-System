@@ -560,11 +560,11 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
     if verify {
         if let (Some(xs), Some(ys)) = (x_str, y_str) {
             use num_bigint::BigUint;
-            let x: BigUint = xs.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(&xs).unwrap_or_default()));
-            let y: BigUint = ys.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(&ys).unwrap_or_default()));
+            let x: BigUint = xs.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(xs.trim_start_matches("0x")).unwrap_or_default()));
+            let y: BigUint = ys.parse().unwrap_or_else(|_| BigUint::from_bytes_be(&hex::decode(ys.trim_start_matches("0x")).unwrap_or_default()));
             let mut proof: Vec<BigUint> = Vec::new();
             for p in &proof_strs {
-                if let Ok(b) = hex::decode(p) {
+                if let Ok(b) = hex::decode(p.trim_start_matches("0x")) {
                     proof.push(BigUint::from_bytes_be(&b));
                 }
             }
@@ -582,7 +582,8 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
     use num_bigint::BigUint;
     let mut rng = OsRng;
     let n = frost_service::vdf::generate_rsa_modulus(&mut rng, bits);
-    let input_bytes = hex::decode(&input_hex).unwrap_or_else(|_| input_hex.as_bytes().to_vec());
+    let clean_input = input_hex.trim_start_matches("0x");
+    let input_bytes = hex::decode(clean_input).unwrap_or_else(|_| input_hex.as_bytes().to_vec());
     let x = BigUint::from_bytes_be(&input_bytes);
     let res = frost_service::vdf::compute_vdf_with_proof(&x, &frost_service::vdf::VDFParams { n: n.clone(), t });
     Ok(json!({

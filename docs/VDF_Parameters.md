@@ -8,7 +8,7 @@ For production deployment, the following parameters are recommended:
 |---|---|---|
 | Modulus size (bits) | 2048 | Standard RSA security level; balances verification gas cost vs security |
 | T (sequential squarings) | 10^6 - 10^7 | Calibrated to desired delay (e.g., 1 day requires benchmarking hardware) |
-| Hash function for challenges | SHA-256 | Consistent with existing codebase |
+| Hash function for challenges | keccak256 | Matches the on-chain verifier's `abi.encodePacked` Fiat-Shamir derivation |
 
 ## Trusted Setup Considerations
 

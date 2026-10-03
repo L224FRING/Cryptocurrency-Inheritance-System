@@ -33,9 +33,14 @@ contract InheritanceVault {
         owner = msg.sender;
         lastCheckInBlock = block.number;
         lastCheckInTime = block.timestamp;
-        currentChallenge = keccak256(abi.encodePacked(blockhash(block.number - 1), block.timestamp, msg.sender));
+        currentChallenge = keccak256(abi.encodePacked(_prevBlockHash(), block.timestamp, msg.sender));
         released = false;
         beneficiarySet = false;
+    }
+
+    /// @dev blockhash(block.number - 1) underflows at genesis; guard it.
+    function _prevBlockHash() internal view returns (bytes32) {
+        return block.number > 0 ? blockhash(block.number - 1) : bytes32(0);
     }
 
     function checkIn() external onlyOwner {
@@ -43,7 +48,7 @@ contract InheritanceVault {
         lastCheckInBlock = block.number;
         lastCheckInTime = block.timestamp;
         currentChallenge = keccak256(abi.encodePacked(
-            blockhash(block.number - 1),
+            _prevBlockHash(),
             block.timestamp,
             msg.sender,
             lastCheckInBlock
@@ -75,11 +80,21 @@ contract InheritanceVault {
         
         require(frostVerifier.verifyFROSTSignature(releaseHash, signature), "invalid signature");
         
+        // Effects before interaction (reentrancy-safe).
         released = true;
         emit Released(beneficiary, block.timestamp);
-        // In a full implementation, would transfer assets here
-        // For now, just mark as released
+
+        // Forward any native assets held by the vault to the beneficiary.
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool ok, ) = payable(beneficiary).call{value: balance}("");
+            require(ok, "transfer failed");
+        }
     }
+
+    /// @notice The vault may hold native assets that are only releasable once
+    /// both the VDF inactivity condition and the FROST threshold signature are met.
+    receive() external payable {}
 
     function getCurrentChallenge() external view returns (bytes32) {
         return currentChallenge;

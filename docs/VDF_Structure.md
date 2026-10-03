@@ -104,15 +104,19 @@ Responsible only for cheap verification:
 
 Given claim "`x` squared `T` times equals `y`":
 
-1. Prover supplies halfway point `μ` (claimed result after `T/2` squarings)
-2. Contract derives challenge `r = H(x, y, μ) mod N` (Fiat-Shamir — prevents
-   either party from choosing `r` favorably)
+1. Prover supplies halfway point `μ = x_cur^(2^a)`, where the remaining
+   exponent `T` is split into `a = floor(T/2)` and `b = T - a`
+2. Contract derives challenge `r = H(x_cur, y_cur, μ, N) mod N` (Fiat-Shamir —
+   prevents either party from choosing `r` favorably). Both the Rust prover and
+   the Solidity verifier use `keccak256` over four 32-byte big-endian words.
 3. Contract computes reduced claim:
-   - `x' = x^r · μ mod N`
-   - `y' = μ^r · y mod N`
-4. Problem reduces to: "`x'` squared `T/2` times equals `y'`" — same claim
-   type, half the exponent
-5. Repeat until the remaining exponent is trivially small, then check directly
+   - `x' = x_cur^r · μ mod N`
+   - `y' = μ^(r · 2^(b-a)) · y_cur mod N`
+     (the extra factor of 2 applies only on uneven, i.e. odd-`T`, rounds)
+4. Problem reduces to: "`x'` squared `b` times equals `y'`" — same claim
+   type, roughly half the exponent
+5. Repeat until the remaining exponent is 1, then check `x_cur^2 == y_cur`
+   directly
 
 ```solidity
 function verifyVDF(
@@ -122,17 +126,30 @@ function verifyVDF(
     uint256 curX = x;
     uint256 curY = y;
     uint256 curT = T;
+    uint256 idx = 0;
 
-    for (uint i = 0; i < halfwayPoints.length; i++) {
-        uint256 mu = halfwayPoints[i];
-        uint256 r = uint256(keccak256(abi.encodePacked(curX, curY, mu))) % N;
+    while (curT > 1 && idx < halfwayPoints.length) {
+        uint256 mu = halfwayPoints[idx];
+        uint256 r = uint256(keccak256(abi.encodePacked(curX, curY, mu, N))) % N;
+
+        uint256 a = curT / 2;
+        uint256 b = curT - a;
+
+        uint256 muR = modexp(mu, r, N);
+        if (b != a) {
+            muR = mulmod(muR, muR, N); // odd step: double the exponent
+        }
 
         curX = mulmod(modexp(curX, r, N), mu, N);
-        curY = mulmod(modexp(mu, r, N), curY, N);
-        curT = curT / 2;
+        curY = mulmod(muR, curY, N);
+        curT = b;
+        idx++;
     }
 
-    return modexp(curX, 2**curT, N) == curY;
+    if (curT == 1) {
+        return mulmod(curX, curX, N) == curY;
+    }
+    return modexp(curX, 2 ** curT, N) == curY;
 }
 ```
 

@@ -16,7 +16,7 @@
 
 ## 3. VDF Enhancements
 - [x] **Complete Pietrzak proof generation** - Proof generation improved for multi-round structure
-- [x] **Improve VDF verification** - Challenge derivation documented; both use SHA256/keccak256 consistently in context
+- [x] **Improve VDF verification** - Rust prover and Solidity verifier now share keccak256 over 32-byte big-endian words; odd-`T` Pietrzak recursion fixed; known-answer test in test/VDFRealProof.t.sol
 - [x] **Add VDF proof submission flow** - Added flexible proof submission with params
 - [x] **Parameter selection** - Documented in VDF_Parameters.md
 - [x] **RSA modulus generation** - Documented with recommendations in VDF_Parameters.md
