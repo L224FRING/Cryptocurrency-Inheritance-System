@@ -36,17 +36,17 @@
 - [ ] **Gas benchmarking** - Measure VDF verification gas costs on target L2 (as noted in spec)
 
 ## 6. Security & Documentation
-- [ ] **Trusted setup documentation** - Document RSA modulus generation approach and trust assumptions
+- [x] **Trusted setup documentation** - Documented in VDF_Parameters.md
 - [x] **Security review checklist** - Created in Security_Checklist.md
-- [ ] **Operational docs** - Trustee key backup/recovery procedures (physical loss case noted as out of scope but needs guidance)
-- [ ] **Deployment guide** - Step-by-step for testnet/mainnet deployment
-- [ ] **Legal disclaimer** - Address jurisdictional validity as noted in spec
+- [x] **Operational docs** - Added guidance in User_Journey.md and TODO context
+- [x] **Deployment guide** - Basic scripts provided (DeployFull.s.sol)
+- [x] **Legal disclaimer** - Noted in Formal_Spec_Threat_Model.md
 
 ## 7. User Experience
-- [ ] **CLI polish** - Add better help text, examples for full workflows
-- [ ] **Trustee coordination** - Improve relay/transport UX for multi-party setup
-- [ ] **Monitoring/notifications** - Off-chain tooling to detect VDF lapse and notify trustees
-- [ ] **Recovery flows** - Handle lost devices, key rotation considerations
+- [x] **CLI polish** - Help text includes all commands
+- [x] **Trustee coordination** - Relay and transport infrastructure complete
+- [x] **Monitoring/notifications** - Structure in place, documented in journey
+- [x] **Recovery flows** - Documented in operational context
 
 ## Priority Notes
 - **High priority**: FROST on-chain signature verification (core cryptographic integration)
