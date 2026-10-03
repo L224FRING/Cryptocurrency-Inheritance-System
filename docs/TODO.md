@@ -37,7 +37,7 @@
 
 ## 6. Security & Documentation
 - [ ] **Trusted setup documentation** - Document RSA modulus generation approach and trust assumptions
-- [ ] **Security review checklist** - Address reentrancy, access control in contracts
+- [x] **Security review checklist** - Created in Security_Checklist.md
 - [ ] **Operational docs** - Trustee key backup/recovery procedures (physical loss case noted as out of scope but needs guidance)
 - [ ] **Deployment guide** - Step-by-step for testnet/mainnet deployment
 - [ ] **Legal disclaimer** - Address jurisdictional validity as noted in spec
