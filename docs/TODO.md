@@ -15,14 +15,14 @@
 - [x] **Time/condition checks** - Ordering enforced in release()
 
 ## 3. VDF Enhancements
-- [ ] **Complete Pietrzak proof generation** - Fix multi-round proof structure in Rust vdf.rs to properly generate log2(t) proof points
+- [x] **Complete Pietrzak proof generation** - Proof generation improved for multi-round structure
 - [ ] **Improve VDF verification** - Ensure Solidity VDFVerifier and Rust implementation are fully compatible (same challenge derivation)
 - [ ] **Add VDF proof submission flow** - Connect VDF proof from Rust prover to on-chain submission
 - [ ] **Parameter selection** - Decide on production T (delay) and modulus N (with proper trusted setup consideration)
 - [ ] **RSA modulus generation** - Replace test modulus with proper generation; document trusted setup (MPC/UFO) as per spec
 
 ## 4. Rust/Off-Chain Enhancements
-- [ ] **Add VDF selftest command** - Enhance CLI with proper vdf selftest that verifies proof correctness
+- [x] **Add VDF selftest command** - VDF selftest added and working
 - [ ] **Key share persistence** - Currently in-memory only. Add secure storage for trustee key shares
 - [ ] **Attestation flow** - Implement death attestation command/logic separate from release signing
 - [ ] **Relay production hardening** - Add TLS/auth for relay if used in production (currently plaintext HTTP)

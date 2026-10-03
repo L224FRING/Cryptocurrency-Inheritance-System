@@ -55,15 +55,9 @@ pub fn compute_vdf_with_proof(x: &BigUint, params: &VDFParams) -> VDFResult {
 }
 
 fn generate_proof(x: &BigUint, t: u64, n: &BigUint, proof_list: &mut Vec<BigUint>) {
-    let mut cur_t = t;
-    let mut _cur_x = x.clone();
-    let mut steps: Vec<u64> = Vec::new();
-    let mut temp = t;
-    while temp > 1 {
-        steps.push(temp);
-        temp >>= 1; // divide by 2
+    if t <= 1 {
+        return;
     }
-    // Generate mu for each halving - collect in order of rounds
     let mut t_current = t;
     while t_current > 1 {
         let t_half = t_current / 2;
