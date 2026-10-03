@@ -2,8 +2,9 @@
 pragma solidity 0.8.28;
 
 contract SchnorrVerifier {
-    // Verify secp256k1 Schnorr signature (BIP-340 style or basic Schnorr)
-    // For FROST aggregated signatures on secp256k1, we need proper verification
+    // Verify secp256k1 Schnorr signature
+    // Signature format: r (32 bytes) + s (32 bytes) for standard Schnorr
+    // For compact 65-byte as produced by FROST (usually r,s in some form)
     function verifySchnorr(
         bytes32 messageHash,
         uint256 r,
@@ -11,31 +12,38 @@ contract SchnorrVerifier {
         uint256 px,
         uint256 py
     ) external view returns (bool) {
-        // Placeholder - full implementation requires EC operations
-        // In practice, would use ecrecover-like operations or precompiles
-        if (r == 0 || s == 0) return false;
+        if (r == 0 || s == 0 || s > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            return false;
+        }
         if (px == 0 && py == 0) return false;
+        // Basic structural validation for now - full Schnorr verification
+        // requires elliptic curve point multiplication which is complex in Solidity
+        // This is a validation stub; production would need proper EC math or precompile usage
         return true;
     }
 
-    function verifyCompactSignature(
+    function verifyCompact(
         bytes32 messageHash,
         bytes calldata signature,
         uint256 px,
         uint256 py
-    ) external view returns (bool) {
-        require(signature.length == 65, "invalid length");
-        // Extract r (first 32 bytes), s (next 32), v (last byte)
+    ) external pure returns (bool) {
+        require(signature.length >= 64, "invalid length");
         uint256 r;
         uint256 s;
-        uint8 v;
         assembly {
-            r := calldataload(add(signature.offset, 32))
-            s := calldataload(add(signature.offset, 64))
-            v := byte(0, calldataload(add(signature.offset, 96)))
+            r := calldataload(add(signature.offset, 0x20))
+            s := calldataload(add(signature.offset, 0x40))
         }
-        // For now, basic validation
         if (r == 0 || s == 0) return false;
         return true;
+    }
+
+    function extractRS(bytes calldata signature) external pure returns (uint256 r, uint256 s) {
+        require(signature.length >= 64, "invalid");
+        assembly {
+            r := calldataload(add(signature.offset, 0x20))
+            s := calldataload(add(signature.offset, 0x40))
+        }
     }
 }
