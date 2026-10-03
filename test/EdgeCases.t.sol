@@ -10,47 +10,46 @@ contract EdgeCasesTest is Test {
     FROSTVerifier public frost;
     VDFVerifier public vdf;
     InheritanceVault public vault;
-    address public owner = makeAddr("owner");
-    address public beneficiary = makeAddr("beneficiary");
+    address public owner;
+    address public beneficiary;
 
     function setUp() public {
-        vm.prank(owner);
+        owner = makeAddr("owner");
+        beneficiary = makeAddr("beneficiary");
+        vm.startPrank(owner);
         vdf = new VDFVerifier(0x10001 * 0x7fffffff12345678, 100, 5);
         frost = new FROSTVerifier();
         vault = new InheritanceVault(address(vdf), address(frost));
+        vm.stopPrank();
     }
 
     function test_FalseAlarmRecovery() public {
-        vm.startPrank(owner);
+        vm.prank(owner);
         vault.setBeneficiary(beneficiary);
         vm.roll(block.number + 10);
+        vm.prank(owner);
         vault.checkIn();
         vm.roll(block.number + 1);
-        vault.checkIn(); // Reset - false alarm recovered
-        vm.stopPrank();
+        vm.prank(owner);
+        vault.checkIn();
         assertFalse(vault.released());
     }
 
     function test_ReplayProtection() public {
-        vm.prank(owner);
+        vm.startPrank(owner);
         frost.setGroupPublicKey(1, 2);
         bytes32 msgHash = keccak256("test");
         bytes memory sig = new bytes(65);
         frost.verifyFROSTSignature(msgHash, sig);
         vm.expectRevert("signature already used");
         frost.verifyFROSTSignature(msgHash, sig);
-    }
-
-    function test_BelowThresholdPrevention() public {
-        // Simulate below threshold scenario - just check structure
-        assertTrue(true);
+        vm.stopPrank();
     }
 
     function test_CannotReleaseTwice() public {
         vm.prank(owner);
         vault.setBeneficiary(beneficiary);
         vm.roll(block.number + 10);
-        // Try to release without conditions
         bytes memory sig = new bytes(65);
         vm.expectRevert("vdf not confirmed");
         vault.release(sig);

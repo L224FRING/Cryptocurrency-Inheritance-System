@@ -10,23 +10,26 @@ contract FROSTEndToEndTest is Test {
     FROSTVerifier public frost;
     VDFVerifier public vdf;
     InheritanceVault public vault;
-    address public owner = makeAddr("owner");
-    address public beneficiary = makeAddr("beneficiary");
+    address public owner;
+    address public beneficiary;
 
     function setUp() public {
-        vm.prank(owner);
+        owner = makeAddr("owner");
+        beneficiary = makeAddr("beneficiary");
+        vm.startPrank(owner);
         vdf = new VDFVerifier(0x10001 * 0x7fffffff12345678, 100, 5);
         frost = new FROSTVerifier();
         vault = new InheritanceVault(address(vdf), address(frost));
+        vm.stopPrank();
     }
 
     function test_FullSetup() public {
-        vm.startPrank(owner);
+        vm.prank(owner);
         vault.setBeneficiary(beneficiary);
         bytes memory compressed = new bytes(33);
         compressed[0] = 0x02;
+        vm.prank(owner);
         frost.setGroupPublicKeyCompressed(compressed);
-        vm.stopPrank();
         assertTrue(vault.beneficiarySet());
         assertTrue(frost.hasGroupKey());
     }
