@@ -6,10 +6,11 @@ contract FROSTVerifier {
     uint256 public groupPublicKeyX;
     uint256 public groupPublicKeyY;
     bool public hasGroupKey;
+    bool public groupKeyIsCompressed; // track format
     
     mapping(bytes32 => bool) public usedSignatures;
 
-    event GroupKeySet(uint256 x, uint256 y);
+    event GroupKeySet(uint256 x, uint256 y, bool compressed);
     event SignatureVerified(bytes32 messageHash, address submitter);
 
     constructor() {
@@ -23,10 +24,11 @@ contract FROSTVerifier {
         groupPublicKeyX = x;
         groupPublicKeyY = y;
         hasGroupKey = true;
-        emit GroupKeySet(x, y);
+        groupKeyIsCompressed = false;
+        emit GroupKeySet(x, y, false);
     }
 
-    function setGroupPublicKeyFromBytes(bytes calldata pubkey) external {
+    function setGroupPublicKeyCompressed(bytes calldata pubkey) external {
         require(msg.sender == owner, "not owner");
         require(pubkey.length == 33, "must be compressed 33 bytes");
         uint8 prefix = uint8(pubkey[0]);
@@ -36,9 +38,18 @@ contract FROSTVerifier {
             x := calldataload(add(pubkey.offset, 0x21))
         }
         groupPublicKeyX = x;
-        groupPublicKeyY = (prefix == 0x03) ? 1 : 0; // store parity; full y needs more
+        groupPublicKeyY = prefix == 0x03 ? 1 : 0;
         hasGroupKey = true;
-        emit GroupKeySet(groupPublicKeyX, groupPublicKeyY);
+        groupKeyIsCompressed = true;
+        emit GroupKeySet(groupPublicKeyX, groupPublicKeyY, true);
+    }
+
+    function extractRS(bytes calldata signature) public pure returns (uint256 r, uint256 s) {
+        require(signature.length >= 64, "invalid sig");
+        assembly {
+            r := calldataload(add(signature.offset, 0x20))
+            s := calldataload(add(signature.offset, 0x40))
+        }
     }
 
     function verifyFROSTSignature(
@@ -46,7 +57,7 @@ contract FROSTVerifier {
         bytes calldata signature
     ) external returns (bool) {
         require(hasGroupKey, "group key not set");
-        require(signature.length == 65, "invalid signature length");
+        require(signature.length >= 64, "invalid signature length");
         bytes32 sigHash = keccak256(abi.encodePacked(messageHash, signature));
         require(!usedSignatures[sigHash], "signature already used");
         usedSignatures[sigHash] = true;
@@ -68,9 +79,9 @@ contract FROSTVerifier {
         return true;
     }
 
-    function getGroupPublicKey() external view returns (uint256 x, uint256 y) {
+    function getGroupPublicKey() external view returns (uint256 x, uint256 y, bool compressed) {
         require(hasGroupKey, "group key not set");
-        return (groupPublicKeyX, groupPublicKeyY);
+        return (groupPublicKeyX, groupPublicKeyY, groupKeyIsCompressed);
     }
 
     function isSignatureUsed(bytes32 messageHash, bytes calldata signature) external view returns (bool) {
