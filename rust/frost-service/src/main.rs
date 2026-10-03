@@ -28,6 +28,7 @@ usage:
   frost-service sign   [options]      run two-round threshold signing
   frost-service matrix [options]      sweep n-of-m and sub-threshold subsets
   frost-service vdf    [options]      compute or verify a VDF proof
+  frost-service attest [options]      create a death attestation
   frost-service --help
 
 options:
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
         Some("sign") => cmd_sign(&args[1..]),
         Some("matrix") => cmd_matrix(&args[1..]),
         Some("vdf") => cmd_vdf(&args[1..]),
+        Some("attest") => cmd_attest(&args[1..]),
         Some("--help" | "-h") => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -591,4 +593,15 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
         "proof_points": res.proof.iter().map(|p| p.to_str_radix(16)).collect::<Vec<_>>(),
         "status": "ok"
     }))
+}
+
+fn cmd_attest(args: &[String]) -> Result<serde_json::Value> {
+    let mut message = "death-attestation".to_string();
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--message" && i + 1 < args.len() {
+            message = args[i + 1].clone();
+        }
+    }
+    let res = frost_service::attestation::create_death_attestation(&message)?;
+    Ok(json!(res))
 }
