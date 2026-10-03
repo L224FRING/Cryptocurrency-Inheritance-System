@@ -57,6 +57,30 @@ forge test                                                  # both Solidity suit
 `forge test` shells out to `rust/frost-service/target/debug/frost-service`, so
 build the Rust crate in debug mode first. `ffi = true` and the `fs_permissions`
 entries in `foundry.toml` exist for that call. See the stale-binary footgun below.
+## Quick Test
+
+Test the core functionality:
+
+```sh
+# FROST threshold signing tests
+cargo test --manifest-path rust/frost-service/Cargo.toml
+
+# Run FROST selftest (3-of-5 DKG + signing)
+./rust/frost-service/target/debug/frost-service selftest
+
+# Run matrix test (all threshold cases)
+./rust/frost-service/target/debug/frost-service matrix
+
+# Test VDF functionality
+./rust/frost-service/target/debug/frost-service vdf selftest
+./rust/frost-service/target/debug/frost-service vdf --t 10
+
+# Test attestation
+./rust/frost-service/target/debug/frost-service attest
+```
+
+All commands return JSON and exit codes indicate success/failure.
+
 
 Check both halves at once:
 
