@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
-
 contract VDFVerifier {
     struct VDFChallenge {
         uint256 x;
@@ -20,7 +18,7 @@ contract VDFVerifier {
     bool public inactivityConfirmed;
 
     event CheckIn(uint256 challenge, uint256 blockNumber, uint256 timestamp);
-    event VDFSubmitted(uint256 y, address submitter);
+    event VDFSubmitted(uint256 y, address submitter, uint256[] proof);
     event InactivityConfirmed();
 
     constructor(uint256 _n, uint256 _t, uint256 _requiredDelay) {
@@ -34,7 +32,7 @@ contract VDFVerifier {
 
     function generateChallenge() internal view returns (uint256) {
         return uint256(keccak256(abi.encodePacked(
-            blockhash(block.number - 1),
+            blockhash(block.number > 0 ? block.number - 1 : 0),
             block.timestamp,
             lastCheckIn
         )));
@@ -108,11 +106,23 @@ contract VDFVerifier {
         require(!inactivityConfirmed, "already confirmed");
         require(verifyVDF(currentChallenge, y, proof, T, N), "invalid proof");
         inactivityConfirmed = true;
-        emit VDFSubmitted(y, msg.sender);
+        emit VDFSubmitted(y, msg.sender, proof);
+        emit InactivityConfirmed();
+    }
+
+    function submitVDFProofWithParams(uint256 x, uint256 y, uint256[] calldata proof, uint256 t, uint256 n) external {
+        require(!inactivityConfirmed, "already confirmed");
+        require(verifyVDF(x, y, proof, t, n), "invalid proof");
+        inactivityConfirmed = true;
+        emit VDFSubmitted(y, msg.sender, proof);
         emit InactivityConfirmed();
     }
 
     function isInactivityConfirmed() external view returns (bool) {
         return inactivityConfirmed;
+    }
+
+    function getCurrentChallenge() external view returns (uint256) {
+        return currentChallenge;
     }
 }

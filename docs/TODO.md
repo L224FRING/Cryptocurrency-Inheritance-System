@@ -17,7 +17,7 @@
 ## 3. VDF Enhancements
 - [x] **Complete Pietrzak proof generation** - Proof generation improved for multi-round structure
 - [x] **Improve VDF verification** - Challenge derivation documented; both use SHA256/keccak256 consistently in context
-- [ ] **Add VDF proof submission flow** - Connect VDF proof from Rust prover to on-chain submission
+- [x] **Add VDF proof submission flow** - Added flexible proof submission with params
 - [ ] **Parameter selection** - Decide on production T (delay) and modulus N (with proper trusted setup consideration)
 - [ ] **RSA modulus generation** - Replace test modulus with proper generation; document trusted setup (MPC/UFO) as per spec
 
