@@ -35,36 +35,20 @@ rust/frost-service/       off-chain FROST crate (frost-core 3.0)
 
 ## Prerequisites
 
-```
-foundry.toml              Foundry config (solc 0.8.28, FFI enabled)
-src/                      Solidity contracts
-  Smoke.sol               placeholder, delete once real contracts land
-  VDFVerifier.sol         Pietrzak VDF verifier using MODEXP precompile
-  FROSTVerifier.sol       FROST threshold signature verifier (on-chain)
-  InheritanceVault.sol    Main vault contract coordinating VDF + FROST
-script/Deploy.s.sol       deploy script for anvil
-script/DeployVDF.s.sol    deploy VDF+Vault
-script/DeployFull.s.sol   deploy full stack (VDF+FROST+Vault)
-test/                     Foundry tests
-  Smoke.t.sol             toolchain sanity check
-  FfiBridge.t.sol         proves the Solidity -> Rust boundary works
-  VDF.t.sol               VDF contract tests
-  Integration.t.sol        end-to-end integration tests
-lib/forge-std/            Foundry test library
-rust/frost-service/       off-chain FROST crate (frost-core 3.0)
-  src/lib.rs              protocol core: party, wire, transport, coordinator
-  src/main.rs             frost-service CLI (selftest, dkg, sign, matrix, dkg-party, sign-party)
-  src/bin/relay.rs        frost-relay, the untrusted message relay
-  tests/protocol.rs       n-of-m, sub-threshold, replay, live-relay tests
-```
-
-## Prerequisites
-
 Toolchain is installed. Add to your shell if the paths are not already there:
 
 ```sh
 export PATH="$PATH:$HOME/.foundry/bin:$HOME/.cargo/bin"
 ```
+
+Verified versions:
+
+| Tool | Version |
+| --- | --- |
+| forge / cast / anvil | 1.8.3 |
+| solc | 0.8.28 (downloaded by forge) |
+| rustc / cargo | 1.92.0 |
+| frost-core / frost-secp256k1 | 3.0.0 |
 
 Verified versions:
 
