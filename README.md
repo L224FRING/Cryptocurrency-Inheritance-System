@@ -1,10 +1,39 @@
 # Crypto Inheritance System — Dev Environment
 
 Toolchain for a threshold-signature inheritance vault: FROST (secp256k1) for key
-custody, VDF-backed liveness gating for inactivity detection, threshold trustee
+custody, VDF-backed liveness gating for inactivity detection, and threshold trustee
 attestation on top of the VDF timer.
 
+The design is **threshold, not multisig**. There is one group key from distributed key
+generation (DKG). Each trustee holds a secret share; partial signatures aggregate into a
+single Schnorr signature. No single party ever holds the full private key.
+
 ## Layout
+
+```
+foundry.toml              Foundry config (solc 0.8.28, FFI enabled)
+src/                      Solidity contracts
+  Smoke.sol               placeholder, delete once real contracts land
+  VDFVerifier.sol         Pietrzak VDF verifier using MODEXP precompile
+  FROSTVerifier.sol       FROST threshold signature verifier (on-chain)
+  InheritanceVault.sol    Main vault contract coordinating VDF + FROST
+script/Deploy.s.sol       deploy script for anvil
+script/DeployVDF.s.sol    deploy VDF+Vault
+script/DeployFull.s.sol   deploy full stack (VDF+FROST+Vault)
+test/                     Foundry tests
+  Smoke.t.sol             toolchain sanity check
+  FfiBridge.t.sol         proves the Solidity -> Rust boundary works
+  VDF.t.sol               VDF contract tests
+  Integration.t.sol        end-to-end integration tests
+lib/forge-std/            Foundry test library
+rust/frost-service/       off-chain FROST crate (frost-core 3.0)
+  src/lib.rs              protocol core: party, wire, transport, coordinator
+  src/main.rs             frost-service CLI (selftest, dkg, sign, matrix, dkg-party, sign-party)
+  src/bin/relay.rs        frost-relay, the untrusted message relay
+  tests/protocol.rs       n-of-m, sub-threshold, replay, live-relay tests
+```
+
+## Prerequisites
 
 ```
 foundry.toml              Foundry config (solc 0.8.28, FFI enabled)
