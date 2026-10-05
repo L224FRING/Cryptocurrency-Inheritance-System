@@ -53,7 +53,6 @@ cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 The relay routes encrypted messages between trustees. It sees envelopes, not secrets.
 
 ```bash
-cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 ./rust/frost-service/target/debug/frost-relay --listen 127.0.0.1:8477 --trustees 5
 ```
 
@@ -63,7 +62,6 @@ Each trustee runs its own client, reads and writes only its own share file, and
 talks to the relay. Five processes, five shares.
 
 ```bash
-cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 export RELAY=http://127.0.0.1:8477
 export SESSION=$(python3 -c "import os;print(os.urandom(32).hex())")
 mkdir -p /tmp/shares
@@ -113,8 +111,6 @@ Note the first account (`0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`) - this is 
 Set variables from previous step.
 
 ```bash
-cd /Users/somamacbook/Cryptocurrency-Inheritance-System
-
 # Anvil's first two deterministic accounts
 export OWNER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 export BENEFICIARY=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
@@ -287,7 +283,6 @@ Each trustee loads only its own share file from the DKG (Step 2) and runs its ow
 process:
 
 ```bash
-cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 export RELAY=http://127.0.0.1:8477
 export SIGSESSION=$(python3 -c "import os;print(os.urandom(32).hex())")
 
