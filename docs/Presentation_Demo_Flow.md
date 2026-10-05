@@ -8,7 +8,6 @@ Show the full end-to-end Cryptocurrency Inheritance System flow from both the Ow
 - Terminal windows (recommend 4-5 for clarity)
 - Foundry installed (`forge`, `cast`, `anvil`)
 - Rust toolchain
-- Repo at: `/Users/somamacbook/Cryptocurrency-Inheritance-System`
 
 Ensure PATH is set:
 ```bash
@@ -22,7 +21,6 @@ export PATH="$PATH:$HOME/.foundry/bin:$HOME/.cargo/bin"
 Before starting the full flow, quickly demonstrate the core cryptography works.
 
 ```bash
-cd /Users/somamacbook/Cryptocurrency-Inheritance-System
 
 # Show FROST 3-of-5 DKG + signing in one go
 ./rust/frost-service/target/debug/frost-service selftest
