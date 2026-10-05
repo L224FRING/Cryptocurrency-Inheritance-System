@@ -1,293 +1,120 @@
-# Crypto Inheritance System — Dev Environment
+# Crypto Inheritance System
 
-Toolchain for a threshold-signature inheritance vault: FROST (secp256k1) for key
-custody, VDF-backed liveness gating for inactivity detection, and threshold trustee
-attestation on top of the VDF timer.
-
-The design is **threshold, not multisig**. There is one group key from distributed key
-generation (DKG). Each trustee holds a secret share; partial signatures aggregate into a
-single Schnorr signature. No single party ever holds the full private key.
+Threshold-signature inheritance vault: FROST (secp256k1) for key custody, VDF-backed liveness gating for inactivity detection, and threshold trustee attestation. The design is **threshold, not multisig** — there is one group key from distributed key generation (DKG). Each trustee holds a secret share; partial signatures aggregate into a single Schnorr signature. No single party ever holds the full private key.
 
 ## Layout
 
 ```
 foundry.toml              Foundry config (solc 0.8.28, FFI enabled)
 src/                      Solidity contracts
-  Smoke.sol               placeholder, delete once real contracts land
   VDFVerifier.sol         Pietrzak VDF verifier using MODEXP precompile
   FROSTVerifier.sol       FROST threshold signature verifier (on-chain)
   InheritanceVault.sol    Main vault contract coordinating VDF + FROST
-script/Deploy.s.sol       deploy script for anvil
-script/DeployVDF.s.sol    deploy VDF+Vault
-script/DeployFull.s.sol   deploy full stack (VDF+FROST+Vault)
+  Smoke.sol               placeholder
+script/DeployFull.s.sol   Canonical full-stack deployment (VDF+FROST+Vault)
+script/DeployVDF.s.sol    Deploy VDF+Vault
+script/Deploy.s.sol       Basic deploy for anvil
 test/                     Foundry tests
-  Smoke.t.sol             toolchain sanity check
-  FfiBridge.t.sol         proves the Solidity -> Rust boundary works
-  VDF.t.sol               VDF contract tests
-  Integration.t.sol        end-to-end integration tests
 lib/forge-std/            Foundry test library
-rust/frost-service/       off-chain FROST crate (frost-core 3.0)
-  src/lib.rs              protocol core: party, wire, transport, coordinator
-  src/main.rs             frost-service CLI (selftest, dkg, sign, matrix, dkg-party, sign-party)
-  src/bin/relay.rs        frost-relay, the untrusted message relay
-  tests/protocol.rs       n-of-m, sub-threshold, replay, live-relay tests
+rust/frost-service/       Off-chain FROST crate (frost-core 3.0)
+  src/lib.rs              Protocol core (party, wire, transport, coordinator, client, persistence)
+  src/main.rs             frost-service CLI
+  src/bin/relay.rs        frost-relay (untrusted message relay)
+  tests/                  Integration tests
 ```
 
-## Prerequisites
+## Requirements
 
-Toolchain is installed. Add to your shell if the paths are not already there:
+| Tool | Version |
+| --- | --- |
+| forge/cast/anvil | 1.8.3 |
+| solc | 0.8.28 (via forge) |
+| rustc/cargo | 1.92.0 |
+| frost-core/frost-secp256k1 | 3.0.0 |
 
-```sh
+Add to PATH if needed:
+
+```bash
 export PATH="$PATH:$HOME/.foundry/bin:$HOME/.cargo/bin"
 ```
 
-Verified versions:
+## Build & Test
 
-| Tool | Version |
-| --- | --- |
-| forge / cast / anvil | 1.8.3 |
-| solc | 0.8.28 (downloaded by forge) |
-| rustc / cargo | 1.92.0 |
-| frost-core / frost-secp256k1 | 3.0.0 |
-
-Verified versions:
-
-| Tool | Version |
-| --- | --- |
-| forge / cast / anvil | 1.8.3 |
-| solc | 0.8.28 (downloaded by forge) |
-| rustc / cargo | 1.92.0 |
-| frost-core / frost-secp256k1 | 3.0.0 |
-
-## Build and test
-
-```sh
-cargo build --manifest-path rust/frost-service/Cargo.toml   # FROST binaries
-cargo test  --manifest-path rust/frost-service/Cargo.toml   # 46 Rust tests
-forge test                                                  # both Solidity suites
+```bash
+cargo build --manifest-path rust/frost-service/Cargo.toml
+cargo test  --manifest-path rust/frost-service/Cargo.toml  # 46 Rust tests
+forge test                                                  # 26 Solidity tests
 ```
 
-`forge test` shells out to `rust/frost-service/target/debug/frost-service`, so
-build the Rust crate in debug mode first. `ffi = true` and the `fs_permissions`
-entries in `foundry.toml` exist for that call. See the stale-binary footgun below.
-## Quick Test
+`forge test` shells out to `rust/frost-service/target/debug/frost-service`, so always rebuild Rust first before running Forge tests.
 
-Test the core functionality:
+## FROST CLI
 
-```sh
-# FROST threshold signing tests
-cargo test --manifest-path rust/frost-service/Cargo.toml
+```bash
+# In-process (convenient, all parties in one process)
+./target/debug/frost-service selftest
+./target/debug/frost-service dkg --trustees 5 --threshold 3
+./target/debug/frost-service sign --participants 1,2,3
+./target/debug/frost-service matrix
 
-# Run FROST selftest (3-of-5 DKG + signing)
-./rust/frost-service/target/debug/frost-service selftest
+# Per-trustee (each trustee runs its own process, talks via relay)
+./target/debug/frost-relay --listen 127.0.0.1:8477 --trustees 5
 
-# Run matrix test (all threshold cases)
-./rust/frost-service/target/debug/frost-service matrix
-
-# Test VDF functionality
-./rust/frost-service/target/debug/frost-service vdf selftest
-./rust/frost-service/target/debug/frost-service vdf --t 10
-
-# Test attestation
-./rust/frost-service/target/debug/frost-service attest
-```
-
-All commands return JSON and exit codes indicate success/failure.
-
-
-Check both halves at once:
-
-```sh
-cargo build --manifest-path rust/frost-service/Cargo.toml && forge test
-```
-
-## Local testnet
-
-```sh
-anvil                                                   # terminal 1, chain id 31337
-forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --broadcast
-```
-
-`Deploy.s.sol` defaults to anvil's first account. Override with
-`DEPLOYER_PRIVATE_KEY`.
-
-## FROST service
-
-`rust/frost-service` runs real multi-party FROST (secp256k1) over secp256k1-SHA256:
-a three-part DKG across the committee, then two-round threshold signing over any
-subset at or above the threshold.
-
-Split into a protocol core and the things that move bytes for it:
-
-| Module | Role |
-| --- | --- |
-| `party` | one trustee. Holds only its own key share, never the group secret. |
-| `wire` | message format. Every message is bound to a 32-byte session id. |
-| `transport` | carries messages. `memory` in-process, `http` over a relay. |
-| `coordinator` | drives a whole session in one process, pumping envelopes until quiet. |
-| `client` | drives one trustee across a relay — the per-trustee, multi-process mode. |
-| `persistence` | writes/loads a `TrusteeShare` so a trustee survives a reboot. |
-| `error` / `report` | one error type, one JSON report shape. |
-
-No Shamir-style reconstruction is involved: the group secret is never assembled,
-at setup or at signing.
-
-### Commands
-
-```sh
-frost-service selftest                  # in-process DKG + 3-of-5 signing check
-frost-service dkg    --threshold 3      # just the DKG
-frost-service sign   --participants 2,3,5
-frost-service matrix                    # sweep n-of-m and sub-threshold subsets
-frost-relay --listen 127.0.0.1:8477     # untrusted message relay
-```
-
-Per-trustee (each trustee its own process, `--relay` required):
-
-```sh
-# one process per trustee; each writes only its own share
+SESSION=$(python3 -c "import os; print(os.urandom(32).hex())")
+mkdir -p /tmp/shares
 for i in 1 2 3 4 5; do
-  frost-service dkg-party --index $i --trustees 5 --threshold 3 \
-    --session $SESSION --relay http://127.0.0.1:8477 --out share-$i.json &
-done; wait
+  ./target/debug/frost-service dkg-party --index $i --trustees 5 --threshold 3 \
+    --session $SESSION --relay http://127.0.0.1:8477 --out /tmp/shares/share-$i.json &
+done
+wait
 
-# 3 of the 5 sign; trustee 1 aggregates into one signature
-frost-service sign-party --index 1 --share share-1.json \
-  --participants 1,2,3 --session $SIGSESSION \
-  --relay http://127.0.0.1:8477 --aggregate
+SIGSESSION=$(python3 -c "import os; print(os.urandom(32).hex())")
+./target/debug/frost-service sign-party --index 1 --share /tmp/shares/share-1.json \
+  --participants 1,2,3 --session $SIGSESSION --relay http://127.0.0.1:8477 --aggregate &
+./target/debug/frost-service sign-party --index 2 --share /tmp/shares/share-2.json \
+  --participants 1,2,3 --session $SIGSESSION --relay http://127.0.0.1:8477 &
+./target/debug/frost-service sign-party --index 3 --share /tmp/shares/share-3.json \
+  --participants 1,2,3 --session $SIGSESSION --relay http://127.0.0.1:8477 &
+wait
 ```
 
-`--trustees`, `--threshold`, `--session`, `--domain`, `--relay`, `--message`,
-`--participants`, `--expect-failure`, `--index`, `--share`, `--out`, `--out-dir`,
-`--aggregate`, `--timeout-ms`. `frost-service --help` lists them.
+Key flags: `--out-dir DIR` (write all shares from in-process DKG), `--aggregate` (aggregator combines partials), `--timeout-ms N` (peer wait budget). All commands emit JSON to stdout.
 
-Every subcommand writes one JSON document to stdout and nothing else. Exit code is
-0 on success, non-zero on failure, so a caller can never mistake a partial report
-for a good one. The DKG is randomized, so the group key and signature differ every
-run.
+## Share files
 
-### The relay is untrusted
+Each trustee saves its share to `share-N.json`. It contains:
 
-`frost-relay` routes opaque bytes between trustee mailboxes and verifies nothing.
-It cannot forge a sender, cannot read a DKG round-2 package meant for someone else
-(those are point-to-point, never broadcast), and gains no information beyond
-delivery: a relay is a worse courier, not a trusted participant. Correctness comes
-from FROST's own package verification, not from trusting the transport.
+- `trustee_id`, `committee`, `threshold`
+- `group_verifying_key` (hex checksum of the group public key)
+- `key_package` (serialized `frost-secp256k1::KeyPackage`) — contains the secret share `F(i)`. **Keep secret.**
+- `public_key_package` (serialized `frost-secp256k1::PublicKeyPackage`) — group/public verification material
 
-```sh
-frost-relay --listen 127.0.0.1:8477 --trustees 5   # terminal 1
-frost-service sign --relay http://127.0.0.1:8477    # terminal 2
+During DKG, each party generates a random polynomial; the final secret share is the evaluation `F(i)` of the joint polynomial. The group secret `F(0)` is never reconstructed. `Party::from_share` verifies the group key matches, preventing file swaps.
+
+## Cryptography summary
+
+- **FROST-secp256k1** (frost-core 3.0.0, frost-secp256k1 3.0.0): DKG + 2-round threshold signing. Signature is a 65-byte compact Schnorr signature (130 hex). Nonces are single-use; envelopes are bound to session/domain/payload. Relay is untrusted; DKG round-2 is point-to-point.
+- **VDF** (Pietrzak over RSA): Proof is generated off-chain and verified on-chain. Fiat–Shamir uses Keccak256 over four 32-byte big-endian words `(x,y,mu,n)`, matching `VDFVerifier` exactly. Modulus `N` is a fixed demo composite; production needs a properly generated RSA modulus with unknown factorization.
+
+## On-chain
+
+- `VDFVerifier`: Pietrzak verification (uses MODEXP). Rust and Solidity share identical challenge encoding.
+- `FROSTVerifier`: Structural checks (group key set, well-formed signature, replay protection). Full secp256k1 Schnorr point verification is a future enhancement.
+- `InheritanceVault`: Requires both VDF confirmation and threshold signature before releasing funds to beneficiary. Owner check-ins reset the inactivity window.
+
+## Development notes
+
+- `dkg`/`sign` run in-process (convenient). `dkg-party`/`sign-party` run each trustee in its own process with only its own share (true separation of duties).
+- In per-trustee mode, the coordinator holds no shares. Peers must all participate or the waiting trustee times out with `Stalled`.
+- `forge test` doesn't build Rust automatically — `cargo build` first.
+- Tests: 46 Rust (including per-trustee CLI + threaded tests) + 26 Solidity. All pass.
+- For a live demo, see `docs/Presentation_Demo_Flow.md`. For design details, see `docs/FrostService.md`.
+
+## Deployment
+
+```bash
+anvil
+forge script script/DeployFull.s.sol --rpc-url http://127.0.0.1:8545 --broadcast --private-key $ANVIL_KEY
 ```
 
-### Per-trustee mode (real separation of duties)
-
-The `coordinator`-based commands run every `Party` in one process, which is fine
-for tests but puts all shares in one place. `dkg-party` / `sign-party` are the
-deployed shape: one OS process per trustee, each loading only its own
-`TrusteeShare` file and reaching the others solely through the relay. The
-coordinator never holds a share. A missing trustee makes the others time out
-with `Stalled` rather than hang, and two of three signers cannot produce a
-signature no matter how long they wait.
-
-`dkg --out-dir DIR` is a shortcut that runs the whole ceremony in one process and
-writes one share per trustee; use it to bootstrap a demo quickly, not as the
-trust story.
-
-### Session ids are single-use
-
-Every `Envelope` and every signed message is bound to a 32-byte session id, hashed
-under a domain separator (`cis/frost/release-attestation/v1`) together with the
-payload. A session id may be signed over **once**: a second run with the same id is
-refused, so commitments from a finished run can never be recycled. A signature
-verifies for exactly one (session, domain, payload) triple and no other.
-
-Signing nonces are one-shot too: consumed before the work, with spent commitment
-sets recorded, because reusing a nonce pair across two messages leaks a key share.
-
-### What the tests cover
-
-`rust/frost-service/tests/protocol.rs` checks the claims, not just the happy path:
-
-- DKG converges on one group key across all trustees.
-- Any subset at or above the threshold signs; signatures are verified independently
-  with `frost` against the group key, not trusted from the crate's own bookkeeping.
-- Sub-threshold subsets are refused across the full 2..5 matrix, and no single trustee
-  can sign a 3-of-5 alone.
-- A signature binds only to its own session, domain, and payload.
-- Session reuse, duplicate commitments, duplicate shares, and nonce reuse are refused.
-- The full protocol runs over a real relay process, and reset leaves no state behind.
-- In `tests/per_trustee.rs`, five concurrent trustee clients complete DKG over a
-  live relay with each share persisted and reloaded, and the real `dkg-party` /
-  `sign-party` subcommands produce a signature that verifies.
-
-`frost-service matrix` runs the same n-of-m sweep from the CLI and reports
-`passed`/`failed` per case.
-
-### Solidity FFI
-
-`test/FfiBridge.t.sol` consumes the `selftest` report with `vm.parseJson*`. It used
-to scrape `println!` output by matching the literal `"threshold             3-of-5"`,
-which broke silently on any whitespace change. Renaming a field in the report now
-fails the suite with a path error instead.
-
-## Known footgun: stale Rust binary
-
-`forge test` does not build the Rust crate. It shells out to
-`rust/frost-service/target/debug/frost-service` as it exists on disk, so editing
-`main.rs` and running `forge test` without an intervening `cargo build` tests the
-*previous* binary and passes anyway. Always rebuild first:
-
-```sh
-cargo build --manifest-path rust/frost-service/Cargo.toml && forge test
-```
-
-## Notes on frost-core 3.0
-
-The 3.0 API differs from 2.x in ways that matter here:
-
-- `SigningPackage::new` takes `BTreeMap<Identifier, SigningCommitments>`, not a
-  `SigningCommitments` struct.
-- `round1::commit` takes a `&SigningShare`, with no identifier argument.
-- `round2::sign(signing_package, signing_nonces, key_package)` — the signing
-  nonces, not the raw commitments, are passed.
-- `aggregate` takes a `PublicKeyPackage`, not a `VerifyingKey`.
-- `verify_signature_share(identifier, verifying_share, share, signing_package, verifying_key)` — five args.
-- `VerifyingKey::verify(&self, msg, &signature)` is a method; `serialize()` returns `Result`.
-- `SigningPackage` is exported at the crate root as `frostk::SigningPackage`.
-- `Identifier` has no `Display` impl. `Trustee` in `main.rs` keeps the numeric
-  index alongside the identifier so error messages can name a trustee.
-- `keys::dkg::part1(.., rng)` and `round1::commit(.., rng)` take `&mut C::Rng`;
-  in a loop that needs a reborrow (`&mut *rng`) or the borrow is moved.
-
-## Not yet set up
-
-Deliberately out of scope so far:
-
-- VDF evaluation. Wesolowski over a class group or RSA group is the likely pick;
-  `kilic/evmvdf` has a Solidity reference around 173k gas per verification.
-  No EVM VDF precompile exists on Ethereum mainnet today.
-- The actual inheritance contracts, trustee registry, and attestation flow.
-- Real subcommands. `selftest` is the only one; DKG and signing are not
-  independently invocable, so the report is generated and thrown away each run.
-  A caller cannot yet ask for a signature over a message of its choosing, which
-  is the shape the vault contracts will need.
-- `k256`, `serde`, `serde_json`, and `sha2` are declared in `Cargo.toml`.
-  `serde`/`serde_json` are now used; `k256` and `sha2` are still unused. A
-  `message_digest` field (SHA-256 of the message) would be the natural way to
-  give `sha2` a purpose and give contracts a stable value to bind an attestation
-  to.
-
-## VDF CLI
-
-The Rust service also includes VDF (Verifiable Delay Function) functionality:
-
-```sh
-# Compute VDF with defaults (t=100, input=deadbeef)
-./rust/frost-service/target/debug/frost-service vdf
-
-# Compute with custom parameters
-./rust/frost-service/target/debug/frost-service vdf --t 20 --input 0x1234abcd
-
-# Run VDF selftest (verifies proof)
-./rust/frost-service/target/debug/frost-service vdf selftest
-```
+Capture `FROSTVerifier`, `VDFVerifier`, `InheritanceVault` addresses from broadcast output. Set the DKG group public key on `FROSTVerifier` via `setGroupPublicKeyCompressed`.
