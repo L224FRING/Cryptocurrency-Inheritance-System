@@ -122,10 +122,6 @@ cast call $VDF_ADDR "isInactivityConfirmed()(bool)" --rpc-url http://127.0.0.1:8
 ```
 
 ```bash
-cast send $VAULT_ADDR "checkIn()" --unlocked --from $OWNER
-```
-
-```bash
 ./rust/frost-service/target/debug/frost-service attest --message "death-confirmed"
 ```
 
