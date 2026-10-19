@@ -9,12 +9,14 @@ foundry.toml              Foundry config (solc 0.8.28, FFI enabled)
 src/                      Solidity contracts
   VDFVerifier.sol         Pietrzak VDF verifier using MODEXP precompile
   FROSTVerifier.sol       FROST threshold signature verifier (on-chain)
+  Secp256k1.sol           secp256k1 point math + FROST challenge (used by FROSTVerifier)
   InheritanceVault.sol    Main vault contract coordinating VDF + FROST
-  Smoke.sol               placeholder
+  Smoke.sol               toolchain smoke contract
 script/DeployFull.s.sol   Canonical full-stack deployment (VDF+FROST+Vault)
 script/DeployVDF.s.sol    Deploy VDF+Vault
 script/Deploy.s.sol       Basic deploy for anvil
 test/                     Foundry tests
+test/fixtures/            Known-answer vectors from the Rust service
 lib/forge-std/            Foundry test library
 rust/frost-service/       Off-chain FROST crate (frost-core 3.0)
   src/lib.rs              Protocol core (party, wire, transport, coordinator, client, persistence)
@@ -42,8 +44,8 @@ export PATH="$PATH:$HOME/.foundry/bin:$HOME/.cargo/bin"
 
 ```bash
 cargo build --manifest-path rust/frost-service/Cargo.toml
-cargo test  --manifest-path rust/frost-service/Cargo.toml  # 46 Rust tests
-forge test                                                  # 26 Solidity tests
+cargo test  --manifest-path rust/frost-service/Cargo.toml  # 47 Rust tests
+forge test                                                  # 58 Solidity tests
 ```
 
 `forge test` shells out to `rust/frost-service/target/debug/frost-service`, so always rebuild Rust first before running Forge tests.
@@ -78,7 +80,9 @@ SIGSESSION=$(python3 -c "import os; print(os.urandom(32).hex())")
 wait
 ```
 
-Key flags: `--out-dir DIR` (write all shares from in-process DKG), `--aggregate` (aggregator combines partials), `--timeout-ms N` (peer wait budget). All commands emit JSON to stdout.
+Key flags: `--out-dir DIR` (write all shares from in-process DKG), `--aggregate` (aggregator combines partials), `--timeout-ms N` (peer wait budget). `sign-party` takes `--message HEX` and `--raw-message`. All commands emit JSON to stdout.
+
+By default a signature covers a canonical JSON binding `{domain, payload_hash, session}`. The vault, however, verifies the signature over its `releaseHash` bytes, so pass `--raw-message --message <releaseHash>` when signing for release (see `docs/Presentation_Demo_Flow.md`, step 7).
 
 ## Share files
 
@@ -99,7 +103,7 @@ During DKG, each party generates a random polynomial; the final secret share is 
 ## On-chain
 
 - `VDFVerifier`: Pietrzak verification (uses MODEXP). Rust and Solidity share identical challenge encoding.
-- `FROSTVerifier`: Structural checks (group key set, well-formed signature, replay protection). Full secp256k1 Schnorr point verification is a future enhancement.
+- `FROSTVerifier`: Real threshold Schnorr verification on-chain. `Secp256k1.sol` implements secp256k1 point arithmetic (Jacobian add/double/mul, compressed-point decompression) and the FROST challenge `e = H2(R ‖ Z ‖ msg)` (RFC 9380 `expand_message_xmd` over SHA-256). Verification checks `s·G == R + e·Z`, plus group-key-on-curve, 65-byte compact signature, `0 < s < N` range, and replay protection. Cross-validated against a real Rust-produced signature in `test/fixtures/frost_kat.json`.
 - `InheritanceVault`: Requires both VDF confirmation and threshold signature before releasing funds to beneficiary. Owner check-ins reset the inactivity window.
 
 ## Development notes
@@ -107,7 +111,9 @@ During DKG, each party generates a random polynomial; the final secret share is 
 - `dkg`/`sign` run in-process (convenient). `dkg-party`/`sign-party` run each trustee in its own process with only its own share (true separation of duties).
 - In per-trustee mode, the coordinator holds no shares. Peers must all participate or the waiting trustee times out with `Stalled`.
 - `forge test` doesn't build Rust automatically — `cargo build` first.
-- Tests: 46 Rust (including per-trustee CLI + threaded tests) + 26 Solidity. All pass.
+- The trustees sign a canonical (domain/payload/session) message by default; `--raw-message` makes them sign the payload bytes verbatim, which is what the vault's `releaseHash` requires.
+- On-chain EC math needs `via_ir = true` (set in `foundry.toml`).
+- Tests: 47 Rust (including the KAT generator, per-trustee CLI, and threaded protocol tests) + 58 Solidity. All pass.
 - For a live demo, see `docs/Presentation_Demo_Flow.md`. For design details, see `docs/FrostService.md`.
 
 ## Deployment

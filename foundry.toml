@@ -6,7 +6,7 @@ solc = "0.8.28"
 evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
-via_ir = false
+via_ir = true
 
 # FROST signing + VDF evaluation live in the Rust crate under rust/.
 # Foundry calls them via `ffi = true` in tests/scripts only; never on a live chain.

@@ -113,6 +113,25 @@ pub fn signing_message(session: &SessionId, domain: &str, payload: &[u8]) -> Vec
     serde_json::to_vec(&request).expect("SignRequest is always serializable")
 }
 
+/// Resolve the exact bytes to be signed.
+///
+/// In raw mode the payload is signed verbatim — this is what the vault's
+/// release hash needs, because the contract verifies the Schnorr signature
+/// over `keccak256("inheritance-release" || ...)` directly. In domain mode
+/// the payload is wrapped in the canonical [`SignRequest`] JSON.
+pub fn resolve_signing_message(
+    session: &SessionId,
+    domain: &str,
+    payload: &[u8],
+    raw: bool,
+) -> Vec<u8> {
+    if raw {
+        payload.to_vec()
+    } else {
+        signing_message(session, domain, payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

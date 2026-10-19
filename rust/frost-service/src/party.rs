@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::persistence::TrusteeShare;
-use crate::wire::{signing_message, Envelope, MessageKind, SessionId, BROADCAST};
+use crate::wire::{Envelope, MessageKind, SessionId, BROADCAST};
 
 type Id = frostk::Identifier;
 type DkgRound1Package = frostk::keys::dkg::round1::Package;
@@ -424,11 +424,13 @@ impl Party {
     // ---- Signing ---------------------------------------------------------
 
     /// Signing round 1: commit to a nonce pair.
+    ///
+    /// `message` is the exact byte string being signed, already resolved by
+    /// the caller via [`crate::wire::resolve_signing_message`].
     pub fn signing_round1<R: RngCore + CryptoRng>(
         &mut self,
         session: SessionId,
-        payload: &[u8],
-        domain: &str,
+        message: &[u8],
         rng: &mut R,
     ) -> Result<Vec<Envelope>> {
         if self.key_package.is_none() {
@@ -449,7 +451,6 @@ impl Party {
             )));
         }
 
-        let message = signing_message(&session, domain, payload);
         let body = commitments.serialize().map_err(|e| {
             Error::Rejected(format!("signing commitment serialization failed: {e}"))
         })?;
@@ -467,7 +468,7 @@ impl Party {
             SigningState {
                 nonces,
                 commitments,
-                message,
+                message: message.to_vec(),
             },
         );
 
@@ -606,13 +607,14 @@ impl Party {
 
     /// Combine shares from at least `min_signers` trustees into one signature
     /// and check it against the group key.
+    ///
+    /// `message` must be the same bytes every participating trustee signed.
     pub fn aggregate(
         &self,
         session: SessionId,
         participants: &[u16],
         min_signers: u16,
-        payload: &[u8],
-        domain: &str,
+        message: &[u8],
     ) -> Result<frostk::Signature> {
         let public_key_package = self
             .public_key_package
@@ -646,14 +648,13 @@ impl Party {
             shares.insert(id, share);
         }
 
-        let message = signing_message(&session, domain, payload);
-        let package = frostk::SigningPackage::new(commitments, &message);
+        let package = frostk::SigningPackage::new(commitments, message);
         let signature = frostk::aggregate(&package, &shares, public_key_package)
             .map_err(|e| Error::Rejected(format!("aggregation failed: {e}")))?;
 
         public_key_package
             .verifying_key()
-            .verify(&message, &signature)
+            .verify(message, &signature)
             .map_err(|e| {
                 Error::Rejected(format!(
                     "signature failed verification against group key: {e}"
@@ -690,7 +691,7 @@ mod tests {
         let mut p = Party::new(1, &[1, 2, 3]).unwrap();
         let mut rng = rand_core::OsRng;
         let err = p
-            .signing_round1([1u8; 32], b"payload", "domain", &mut rng)
+            .signing_round1([1u8; 32], b"payload", &mut rng)
             .unwrap_err();
         assert!(matches!(err, Error::NotReady(_)), "got {err:?}");
     }

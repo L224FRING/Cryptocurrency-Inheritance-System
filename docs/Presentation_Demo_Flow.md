@@ -179,7 +179,13 @@ cast balance $VAULT_ADDR --rpc-url http://127.0.0.1:8545
 This is what happens while the owner is alive and well.
 
 ```bash
-# Owner checks in to reset inactivity timer
+# The VDF verifier owns the inactivity clock; checking in resets it
+# (and clears any confirmed inactivity).
+cast send $VDF_ADDR "checkIn()" \
+  --rpc-url http://127.0.0.1:8545 \
+  --unlocked --from $OWNER
+
+# The vault's own check-in refreshes the challenge bound into the release hash.
 cast send $VAULT_ADDR "checkIn()" \
   --rpc-url http://127.0.0.1:8545 \
   --unlocked --from $OWNER
@@ -201,25 +207,33 @@ challenge (separate from the vault's), so read it from `VDF_ADDR`.
 ```bash
 CHALLENGE=$(cast call $VDF_ADDR "getCurrentChallenge()(uint256)" --rpc-url http://127.0.0.1:8545 | awk '{print $1}')
 echo "Challenge: $CHALLENGE"
-T_VAL=$(cast call $VDF_ADDR "T()(uint256)" --rpc-url http://127.0.0.1:8545)
-DELAY=$(cast call $VDF_ADDR "requiredDelay()(uint256)" --rpc-url http://127.0.0.1:8545)
-echo "T: $T_VAL  requiredDelay: $DELAY"
+T_VAL=$(cast call $VDF_ADDR "T()(uint256)" --rpc-url http://127.0.0.1:8545 | awk '{print $1}')
+N_VAL=$(cast call $VDF_ADDR "N()(uint256)" --rpc-url http://127.0.0.1:8545 | awk '{print $1}')
+DELAY=$(cast call $VDF_ADDR "requiredDelay()(uint256)" --rpc-url http://127.0.0.1:8545 | awk '{print $1}')
+echo "T: $T_VAL  N: $N_VAL  requiredDelay: $DELAY"
 ```
 
 **Compute the VDF off-chain (anyone can run this):**
 
+The proof must be computed against the *exact* modulus `N` the verifier
+enforces, so pass it with `--n`. Without `--n` the prover generates a fresh
+random modulus and the on-chain check will reject the proof.
+
 ```bash
-# challenge as hex (no 0x prefix is also accepted)
+# challenge and modulus as hex (no 0x prefix is also accepted)
 CHEX=$(python3 -c "print(hex($CHALLENGE)[2:])")
-./rust/frost-service/target/debug/frost-service vdf --t $T_VAL --input 0x$CHEX > /tmp/vdf.json
+NHEX=$(python3 -c "print(hex($N_VAL)[2:])")
+./rust/frost-service/target/debug/frost-service vdf \
+  --t $T_VAL --n 0x$NHEX --input 0x$CHEX > /tmp/vdf.json
 cat /tmp/vdf.json
 ```
 
-Extract `y` and the `proof_points` as a Solidity `uint256[]`:
+Extract `y` and the `proof_points` as a Solidity `uint256[]`. `y` is hex;
+`proof_points` are already decimal.
 
 ```bash
 Y=$(python3 -c "import json;print(int(json.load(open('/tmp/vdf.json'))['y'],16))")
-PROOF=$(python3 -c "import json;d=json.load(open('/tmp/vdf.json'));print('['+','.join(str(int(p,16)) for p in d['proof_points'])+']')")
+PROOF=$(python3 -c "import json;d=json.load(open('/tmp/vdf.json'));print('['+','.join(str(int(p)) for p in d['proof_points'])+']')")
 echo "y=$Y"; echo "proof=$PROOF"
 ```
 
@@ -249,9 +263,9 @@ cast call $VDF_ADDR "isInactivityConfirmed()(bool)" --rpc-url http://127.0.0.1:8
 via the `MODEXP` precompile). No trusted party is needed to submit it, and the
 sequential computation is what proves real time passed.
 
-**False-alarm demo (optional):** Before submitting, call
-`cast send $VAULT_ADDR "checkIn()" --unlocked --from $OWNER` to show the owner
-returning resets the clock so the release never happens.
+**False-alarm demo (optional):** Before submitting, reset the liveness clock with
+`cast send $VDF_ADDR "checkIn()" --unlocked --from $OWNER` to show the owner
+returning clears any pending inactivity so the release never happens.
 
 ---
 
@@ -278,9 +292,18 @@ aggregated into a single ordinary Schnorr signature. Fewer than `threshold`
 shares cannot produce one.
 
 Each trustee loads only its own share file from the DKG (Step 2) and runs its own
-process:
+process. The vault checks the signature over its **release hash**, so the
+trustees must sign that exact 32-byte value verbatim (`--raw-message`):
 
 ```bash
+# The vault's release hash: keccak256(abi.encodePacked(
+#   "inheritance-release", vault, beneficiary, vaultCurrentChallenge)).
+# "inheritance-release" as hex, then packed 20-byte and 32-byte fields (no padding).
+VAULT_CHALLENGE=$(cast call $VAULT_ADDR "getCurrentChallenge()(bytes32)" --rpc-url http://127.0.0.1:8545)
+RELEASE_HASH=$(cast keccak \
+  0x696e6865726974616e63652d72656c65617365${VAULT_ADDR#0x}${BENEFICIARY#0x}${VAULT_CHALLENGE#0x})
+echo "release hash = $RELEASE_HASH"
+
 export RELAY=http://127.0.0.1:8477
 export SIGSESSION=$(python3 -c "import os;print(os.urandom(32).hex())")
 
@@ -288,27 +311,32 @@ export SIGSESSION=$(python3 -c "import os;print(os.urandom(32).hex())")
 ./rust/frost-service/target/debug/frost-service sign-party \
   --index 1 --share /tmp/shares/share-1.json \
   --participants 1,2,3 --session $SIGSESSION \
-  --relay $RELAY --aggregate > /tmp/sign1.json &
+  --relay $RELAY --aggregate --raw-message --message $RELEASE_HASH > /tmp/sign1.json &
 
 # Trustees 2 and 3 each contribute a partial, then exit.
 ./rust/frost-service/target/debug/frost-service sign-party \
   --index 2 --share /tmp/shares/share-2.json \
-  --participants 1,2,3 --session $SIGSESSION --relay $RELAY &
+  --participants 1,2,3 --session $SIGSESSION \
+  --relay $RELAY --raw-message --message $RELEASE_HASH &
 
 ./rust/frost-service/target/debug/frost-service sign-party \
   --index 3 --share /tmp/shares/share-3.json \
-  --participants 1,2,3 --session $SIGSESSION --relay $RELAY &
+  --participants 1,2,3 --session $SIGSESSION \
+  --relay $RELAY --raw-message --message $RELEASE_HASH &
 wait
 
-# The single aggregated Schnorr signature (no `.signing.` wrapper here).
+# The single aggregated Schnorr signature (65-byte compact, no wrapper here).
 SIG=$(python3 -c "import json;print(json.load(open('/tmp/sign1.json'))['signature'])")
 echo "signature=$SIG"
 ```
 
-**Point to highlight:** three separate OS processes, three separate secret files.
-Only nonce commitments (public) and partial signatures cross the relay; a share
-never leaves its process. The one aggregate signature is indistinguishable from a
-normal Schnorr signature and does not reveal *which* trustees signed.
+**Point to highlight:** the signature is over the vault's own `releaseHash`, so
+it authorizes exactly this vault, this beneficiary, and this challenge — nothing
+else, and the contract re-derives the hash before verifying. Three separate OS
+processes with three separate secret files still yield a single 65-byte
+signature: only nonce commitments (public) and partial signatures cross the
+relay, a share never leaves its process, and the aggregate is indistinguishable
+from a normal Schnorr signature (it does not reveal *which* trustees signed).
 
 **Say this out loud (trust model):** the relay is untrusted and sees every
 envelope, but FROST's own package verification rejects anything that does not
@@ -318,18 +346,22 @@ production each trustee generates its own during DKG rather than receiving it.
 
 > **Shortcut (in-process demo):** `frost-service sign --trustees 5 --threshold 3
 > --participants 1,2,3` runs the same protocol with all parties in one process.
-> It is convenient for a quick check but hides the trust boundary, so prefer the
-> `sign-party` form above when the point *is* separation of duties.
+> It is convenient for a quick check but hides the trust boundary and uses its
+> own freshly generated group key, so it will **not** satisfy the on-chain
+> release for the DKG from Step 2 — use the `sign-party` form above (with
+> `--raw-message --message $RELEASE_HASH`) for that.
 
 ---
 
 ## 8. Final Release (Submit to Contract)
 
-Anyone may submit the aggregated signature. The vault checks both gates before
-releasing custody.
+Anyone may submit the aggregated signature. The vault recomputes its release
+hash from live state and checks it against the signature, so submit while the
+vault's `currentChallenge` is unchanged (no intervening `checkIn`). The vault
+checks both gates before releasing custody.
 
 ```bash
-# Submit release
+# Submit release (signature must be over release hash computed in Step 7b)
 cast send $VAULT_ADDR "release(bytes)" 0x$SIG \
   --rpc-url http://127.0.0.1:8545 \
   --unlocked --from $BENEFICIARY
@@ -358,11 +390,15 @@ cast balance $BENEFICIARY --rpc-url http://127.0.0.1:8545
 
 Be upfront about these if asked; they are documented limitations, not hidden gaps.
 
-- **On-chain FROST verification is structural.** `FROSTVerifier` enforces that a
-  group key is set, that the signature is well-formed (≥64 bytes), and that each
-  signature is used at most once (replay protection). Full secp256k1 Schnorr
-  verification on-chain (point math, `sG == R + eP`) is a future enhancement;
-  the cryptographic verification is done off-chain by the Rust FROST protocol.
+- **On-chain FROST verification is real.** `FROSTVerifier` performs full
+  secp256k1 Schnorr verification on-chain: `Secp256k1.sol` implements the point
+  arithmetic (Jacobian add/double/mul, compressed-point decompression) and the
+  FROST challenge `e = H2(R ‖ Z ‖ msg)` (RFC 9380 `expand_message_xmd` over
+  SHA-256), then checks `s·G == R + e·Z`. It also enforces that a group key is
+  set, that the signature is a well-formed 65-byte compact signature with
+  `0 < s < N`, and that each signature is used at most once (replay
+  protection). The Rust FROST protocol remains the source of the threshold
+  shares; the contract independently re-verifies the aggregate signature.
 - **RSA modulus is a fixed test value.** The deployed `N` is a small demo
   composite. Production needs a properly generated RSA modulus with unknown
   factorization (trusted-setup considerations are in `docs/VDF_Parameters.md`).

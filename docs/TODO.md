@@ -1,10 +1,10 @@
 # TODO List - Crypto Inheritance System
 
 ## 1. FROST On-Chain Components (Critical)
-- [x] **Implement Schnorr signature verification on-chain** - Basic structure added with verification helpers and replay protection (full EC math noted as future enhancement)
-- [x] **Add signature parsing** - Parse 65-byte compact signatures (r, s, v) correctly in FROSTVerifier
+- [x] **Implement Schnorr signature verification on-chain** - Full secp256k1 point math (`Secp256k1.sol`) + FROST challenge `e = H2(R ‖ Z ‖ msg)`; verifies `s·G == R + e·Z` on-chain. Cross-validated against a real Rust FROST signature (`test/fixtures/frost_kat.json`).
+- [x] **Add signature parsing** - Parse 65-byte compact signatures (compressed R ‖ z) in FROSTVerifier
 - [x] **Integrate group public key from DKG** - Store and use the actual group verifying key from FROST DKG in contracts (support for compressed keys added)
-- [x] **Message hashing/binding** - Message hashing structure in place; can be aligned with Rust wire format
+- [x] **Message hashing/binding** - The vault verifies the release hash the trustees sign in raw mode (`--raw-message`); the FROST challenge binds `R ‖ Z ‖ message`.
 - [x] **Signature replay protection** - Add nonces/used signatures tracking to prevent replay attacks on-chain
 
 ## 2. InheritanceVault Integration

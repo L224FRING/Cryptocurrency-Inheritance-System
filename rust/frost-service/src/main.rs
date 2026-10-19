@@ -46,6 +46,7 @@ options:
   --domain STR        signing domain separator           (default cis/frost/release-attestation/v1)
   --relay URL         coordinate through a relay         (default: in-process)
   --message HEX       payload to sign                    (default: attestation string)
+  --raw-message       sign --message verbatim, no SignRequest wrap
   --participants L    comma-separated trustee indices    (default: 1..T)
   --expect-failure    require rejection, report the reason
   --index N           this trustee's index (party commands)
@@ -137,6 +138,7 @@ fn selftest() -> Result<SelftestReport> {
         signature: SignatureReport {
             message: String::from_utf8_lossy(MESSAGE).into_owned(),
             message_hex: hex::encode(MESSAGE),
+            signed_message: signed.signed_message,
             signers,
             shares_aggregated: MIN_SIGNERS,
             value: signed.signature,
@@ -158,6 +160,8 @@ struct Options {
     domain: String,
     relay: Option<String>,
     message: Vec<u8>,
+    /// Sign `message` verbatim instead of wrapping it in SignRequest JSON.
+    raw_message: bool,
     participants: Vec<u16>,
     expect_failure: bool,
     /// This trustee's index, for the per-trustee commands.
@@ -183,6 +187,7 @@ impl Default for Options {
             domain: SIGNING_DOMAIN.to_string(),
             relay: None,
             message: MESSAGE.to_vec(),
+            raw_message: false,
             participants: Vec::new(),
             expect_failure: false,
             index: None,
@@ -209,7 +214,7 @@ fn parse_options(args: &[String]) -> Result<Options> {
         };
 
         // Flags that take no value, so the cursor advances by one.
-        let valueless = matches!(flag, "--expect-failure" | "--aggregate");
+        let valueless = matches!(flag, "--expect-failure" | "--aggregate" | "--raw-message");
 
         match flag {
             "--trustees" => options.trustees = next(i)?.parse().map_err(bad_number)?,
@@ -218,6 +223,7 @@ fn parse_options(args: &[String]) -> Result<Options> {
             "--domain" => options.domain = next(i)?,
             "--relay" => options.relay = Some(next(i)?),
             "--message" => options.message = parse_hex(&next(i)?, "--message")?,
+            "--raw-message" => options.raw_message = true,
             "--participants" => {
                 options.participants = parse_list(&next(i)?)?;
                 participants_set = true;
@@ -434,6 +440,7 @@ fn cmd_sign_party(args: &[String]) -> Result<serde_json::Value> {
         &options.participants,
         &options.message,
         &options.domain,
+        options.raw_message,
         options.aggregate,
         party_timeout(&options),
         &mut rng,
@@ -493,7 +500,8 @@ fn cmd_sign(args: &[String]) -> Result<serde_json::Value> {
             &options.participants,
             &options.message,
             &options.domain,
-        ),
+        )
+        .raw(options.raw_message),
         &mut rng,
     );
 
@@ -673,6 +681,7 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
     let mut t: u64 = 100;
     let mut bits: usize = 1024;
     let mut input_hex = String::from("deadbeef");
+    let mut modulus_hex: Option<String> = None;
     let mut verify = false;
     let mut x_str: Option<String> = None;
     let mut y_str: Option<String> = None;
@@ -703,6 +712,14 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
                     i += 2;
                 } else {
                     return Err(Error::BadArgument("--bits needs value".to_string()));
+                }
+            }
+            "--n" => {
+                if i + 1 < args.len() {
+                    modulus_hex = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    return Err(Error::BadArgument("--n needs value".to_string()));
                 }
             }
             "--input" => {
@@ -778,8 +795,17 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
 
     // Compute mode
     use num_bigint::BigUint;
-    let mut rng = OsRng;
-    let n = frost_service::vdf::generate_rsa_modulus(&mut rng, bits);
+    let n = match modulus_hex {
+        Some(raw) => {
+            let bytes = parse_hex(&raw, "--n")?;
+            let n = BigUint::from_bytes_be(&bytes);
+            if n == BigUint::from(0u32) {
+                return Err(Error::BadArgument("--n must not be zero".to_string()));
+            }
+            n
+        }
+        None => frost_service::vdf::generate_rsa_modulus(&mut OsRng, bits),
+    };
     let clean_input = input_hex.trim_start_matches("0x");
     let input_bytes = hex::decode(clean_input).unwrap_or_else(|_| input_hex.as_bytes().to_vec());
     let x = BigUint::from_bytes_be(&input_bytes);
@@ -792,7 +818,7 @@ fn cmd_vdf(args: &[String]) -> Result<serde_json::Value> {
         "y": res.y.to_str_radix(16),
         "t": t,
         "n": n.to_str_radix(16),
-        "proof_points": res.proof.iter().map(|p| p.to_str_radix(16)).collect::<Vec<_>>(),
+        "proof_points": res.proof.iter().map(|p| p.to_str_radix(10)).collect::<Vec<_>>(),
         "status": "ok"
     }))
 }

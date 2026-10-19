@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {Secp256k1} from "./Secp256k1.sol";
+
 contract FROSTVerifier {
     address public owner;
     uint256 public groupPublicKeyX;
     uint256 public groupPublicKeyY;
     bool public hasGroupKey;
-    bool public groupKeyIsCompressed; // track format
-    
+    bool public groupKeyIsCompressed;
+    uint8 public groupKeyPrefix;
+
     mapping(bytes32 => bool) public usedSignatures;
 
     event GroupKeySet(uint256 x, uint256 y, bool compressed);
@@ -20,9 +23,10 @@ contract FROSTVerifier {
 
     function setGroupPublicKey(uint256 x, uint256 y) external {
         require(msg.sender == owner, "not owner");
-        require(x != 0 || y != 0, "invalid key");
+        require(Secp256k1.isOnCurve(x, y), "point not on curve");
         groupPublicKeyX = x;
         groupPublicKeyY = y;
+        groupKeyPrefix = uint8(y & 1 == 1 ? 0x03 : 0x02);
         hasGroupKey = true;
         groupKeyIsCompressed = false;
         emit GroupKeySet(x, y, false);
@@ -35,45 +39,36 @@ contract FROSTVerifier {
         require(prefix == 0x02 || prefix == 0x03, "invalid prefix");
         uint256 x;
         assembly {
-            x := calldataload(add(pubkey.offset, 0x21))
+            x := calldataload(add(pubkey.offset, 0x01))
         }
-        groupPublicKeyX = x;
-        groupPublicKeyY = prefix == 0x03 ? 1 : 0;
+        (uint256 px, uint256 py) = Secp256k1.decompress(x, prefix == 0x03);
+        groupPublicKeyX = px;
+        groupPublicKeyY = py;
+        groupKeyPrefix = prefix;
         hasGroupKey = true;
         groupKeyIsCompressed = true;
-        emit GroupKeySet(groupPublicKeyX, groupPublicKeyY, true);
+        emit GroupKeySet(px, py, true);
     }
 
-    function extractRS(bytes calldata signature) public pure returns (uint256 r, uint256 s) {
-        require(signature.length >= 64, "invalid sig");
-        assembly {
-            r := calldataload(add(signature.offset, 0x20))
-            s := calldataload(add(signature.offset, 0x40))
-        }
-    }
-
-    function verifyFROSTSignature(
-        bytes32 messageHash,
-        bytes calldata signature
-    ) external returns (bool) {
+    function verifyFROSTSignature(bytes32 messageHash, bytes calldata signature) external returns (bool) {
         require(hasGroupKey, "group key not set");
-        require(signature.length >= 64, "invalid signature length");
+        require(signature.length == 65, "invalid signature length");
+        uint8 prefix = uint8(signature[0]);
+        require(prefix == 0x02 || prefix == 0x03, "invalid signature prefix");
+
+        uint256 s;
+        assembly {
+            s := calldataload(add(signature.offset, 0x21))
+        }
+        require(s > 0 && s < Secp256k1.N, "invalid signature scalar");
+
         bytes32 sigHash = keccak256(abi.encodePacked(messageHash, signature));
         require(!usedSignatures[sigHash], "signature already used");
-        usedSignatures[sigHash] = true;
-        emit SignatureVerified(messageHash, msg.sender);
-        return true;
-    }
 
-    function verifySignature(
-        bytes32 messageHash,
-        uint8 v,
-        uint256 r,
-        uint256 s
-    ) external returns (bool) {
-        require(hasGroupKey, "group key not set");
-        bytes32 sigHash = keccak256(abi.encodePacked(messageHash, r, s, v));
-        require(!usedSignatures[sigHash], "signature already used");
+        bytes memory rCompressed = signature[0:33];
+        bytes memory zCompressed = abi.encodePacked(groupKeyPrefix, bytes32(groupPublicKeyX));
+        require(Secp256k1.verifySchnorr(messageHash, rCompressed, zCompressed, s), "invalid signature");
+
         usedSignatures[sigHash] = true;
         emit SignatureVerified(messageHash, msg.sender);
         return true;

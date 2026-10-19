@@ -61,6 +61,9 @@ fn hex_decode(s: &str) -> Vec<u8> {
 struct RunningRelay {
     child: Child,
     base: String,
+    // Kept alive for the relay's lifetime: the relay writes a second startup
+    // line, and closing the read end early would SIGPIPE it mid-test.
+    _stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl RunningRelay {
@@ -73,10 +76,10 @@ impl RunningRelay {
             .expect("relay binary starts");
 
         let stdout = child.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
         let mut line = String::new();
         {
             use std::io::BufRead as _;
-            let mut reader = std::io::BufReader::new(stdout);
             reader.read_line(&mut line).expect("relay greeting");
         }
         let addr = line
@@ -88,6 +91,7 @@ impl RunningRelay {
         Self {
             child,
             base: format!("http://{addr}"),
+            _stdout: reader,
         }
     }
 }
@@ -184,6 +188,7 @@ fn separate_trustee_processes_complete_dkg_and_signing() {
                     &participants,
                     MESSAGE,
                     SIGNING_DOMAIN,
+                    false,
                     index == 1,
                     TIMEOUT,
                     &mut OsRng,

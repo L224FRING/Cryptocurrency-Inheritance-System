@@ -21,7 +21,7 @@ use crate::coordinator::dispatch;
 use crate::error::{Error, Result};
 use crate::party::Party;
 use crate::transport::Transport;
-use crate::wire::SessionId;
+use crate::wire::{resolve_signing_message, SessionId};
 
 /// How often a waiting client re-checks its inbox.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -119,6 +119,7 @@ pub fn run_signing_party<R: RngCore + CryptoRng>(
     participants: &[u16],
     payload: &[u8],
     domain: &str,
+    raw: bool,
     aggregate: bool,
     timeout: Duration,
     rng: &mut R,
@@ -130,9 +131,10 @@ pub fn run_signing_party<R: RngCore + CryptoRng>(
         )));
     }
     let expected = participants.len();
+    let message = resolve_signing_message(&session, domain, payload, raw);
 
     // Round 1: commit a nonce pair, then collect every other signer's.
-    for envelope in party.signing_round1(session, payload, domain, rng)? {
+    for envelope in party.signing_round1(session, &message, rng)? {
         transport.send(me, envelope)?;
     }
     wait_until(party, transport, timeout, "signing commitments", |p| {
@@ -153,7 +155,7 @@ pub fn run_signing_party<R: RngCore + CryptoRng>(
         p.signature_share_count(&session) >= expected
     })?;
 
-    let signature = party.aggregate(session, participants, threshold, payload, domain)?;
+    let signature = party.aggregate(session, participants, threshold, &message)?;
     let bytes = signature
         .serialize()
         .map_err(|e| Error::Rejected(format!("signature serialization failed: {e}")))?;

@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::error::{Error, Result};
 use crate::party::Party;
 use crate::transport::Transport;
-use crate::wire::{Envelope, MessageKind, SessionId};
+use crate::wire::{resolve_signing_message, Envelope, MessageKind, SessionId};
 
 const MAX_PUMP_ROUNDS: usize = 64;
 
@@ -28,6 +28,9 @@ pub struct DkgOutcome {
 pub struct SigningOutcome {
     pub session: String,
     pub message: String,
+    /// The exact bytes the trustees signed. Equal to `message` in raw mode;
+    /// in domain mode it is the canonical SignRequest JSON wrapping.
+    pub signed_message: String,
     pub participants: Vec<u16>,
     pub threshold: u16,
     pub group_verifying_key: String,
@@ -187,6 +190,9 @@ pub struct SigningRequest<'a> {
     pub participants: &'a [u16],
     pub payload: &'a [u8],
     pub domain: &'a str,
+    /// When true, sign `payload` verbatim instead of wrapping it in the
+    /// canonical SignRequest JSON. The vault's release hash needs this.
+    pub raw: bool,
 }
 
 impl<'a> SigningRequest<'a> {
@@ -203,7 +209,13 @@ impl<'a> SigningRequest<'a> {
             participants,
             payload,
             domain,
+            raw: false,
         }
+    }
+
+    pub fn raw(mut self, raw: bool) -> Self {
+        self.raw = raw;
+        self
     }
 }
 
@@ -220,7 +232,10 @@ pub fn run_signing<R: RngCore + CryptoRng>(
         participants,
         payload,
         domain,
+        raw,
     } = *request;
+
+    let message = resolve_signing_message(&session, domain, payload, raw);
 
     if (participants.len() as u16) < min_signers {
         return Err(Error::NotReady(format!(
@@ -250,7 +265,7 @@ pub fn run_signing<R: RngCore + CryptoRng>(
     let mut outbox = Vec::new();
     for party in parties.iter_mut() {
         if participants.contains(&party.me()) {
-            outbox.push(party.signing_round1(session, payload, domain, rng)?);
+            outbox.push(party.signing_round1(session, &message, rng)?);
         } else {
             outbox.push(Vec::new());
         }
@@ -274,7 +289,7 @@ pub fn run_signing<R: RngCore + CryptoRng>(
         .iter()
         .find(|p| p.me() == participants[0])
         .expect("checked above");
-    let signature = aggregator.aggregate(session, participants, min_signers, payload, domain)?;
+    let signature = aggregator.aggregate(session, participants, min_signers, &message)?;
     let signature_bytes = signature
         .serialize()
         .map_err(|e| Error::Rejected(format!("signature serialization failed: {e}")))?;
@@ -282,6 +297,7 @@ pub fn run_signing<R: RngCore + CryptoRng>(
     Ok(SigningOutcome {
         session: hex::encode(session),
         message: hex::encode(payload),
+        signed_message: hex::encode(&message),
         participants: participants.to_vec(),
         threshold: min_signers,
         group_verifying_key: hex::encode(group_verifying_key),

@@ -9,7 +9,7 @@ use frost_service::coordinator::{self, SigningOutcome, SigningRequest};
 use frost_service::transport::http::HttpTransport;
 use frost_service::transport::memory::MemoryTransport;
 use frost_service::transport::Transport;
-use frost_service::wire::{SessionId, SIGNING_DOMAIN};
+use frost_service::wire::{resolve_signing_message, SessionId, SIGNING_DOMAIN};
 use rand_core::{OsRng, RngCore};
 
 use frost_secp256k1 as frostk;
@@ -251,8 +251,9 @@ fn a_replayed_round1_commitment_is_rejected() {
     coordinator::run_dkg(&mut parties, &mut transport, session, 2, &mut rng).unwrap();
 
     // Party 2 publishes a commitment.
+    let message = resolve_signing_message(&session, SIGNING_DOMAIN, MESSAGE, false);
     let envelope = parties[1]
-        .signing_round1(session, MESSAGE, SIGNING_DOMAIN, &mut rng)
+        .signing_round1(session, &message, &mut rng)
         .unwrap()
         .remove(0);
 
@@ -275,12 +276,13 @@ fn a_trustee_will_not_sign_twice_with_the_same_nonces() {
     coordinator::run_dkg(&mut parties, &mut transport, session, 2, &mut rng).unwrap();
 
     // Collect every commitment at trustee 1.
+    let message = resolve_signing_message(&session, SIGNING_DOMAIN, MESSAGE, false);
     parties[0]
-        .signing_round1(session, MESSAGE, SIGNING_DOMAIN, &mut rng)
+        .signing_round1(session, &message, &mut rng)
         .expect("trustee 1 commits");
     for other in [1usize, 2] {
         let envelope = parties[other]
-            .signing_round1(session, MESSAGE, SIGNING_DOMAIN, &mut rng)
+            .signing_round1(session, &message, &mut rng)
             .expect("commitment published")
             .remove(0);
         parties[0]
@@ -310,12 +312,13 @@ fn a_duplicate_signature_share_is_refused() {
     let mut transport = MemoryTransport::new(coordinator::committee(3));
     coordinator::run_dkg(&mut parties, &mut transport, session, 2, &mut rng).unwrap();
 
+    let message = resolve_signing_message(&session, SIGNING_DOMAIN, MESSAGE, false);
     parties[0]
-        .signing_round1(session, MESSAGE, SIGNING_DOMAIN, &mut rng)
+        .signing_round1(session, &message, &mut rng)
         .expect("trustee 1 commits");
     for other in [1usize, 2] {
         let envelope = parties[other]
-            .signing_round1(session, MESSAGE, SIGNING_DOMAIN, &mut rng)
+            .signing_round1(session, &message, &mut rng)
             .expect("published")
             .remove(0);
         parties[0]
@@ -387,6 +390,9 @@ fn dkg_round2_packages_never_reach_a_third_party() {
 struct RunningRelay {
     child: Child,
     base: String,
+    // Kept alive for the relay's lifetime. The relay writes a second startup
+    // line; dropping the read end early would SIGPIPE it mid-test.
+    _stdout: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl RunningRelay {
@@ -400,10 +406,10 @@ impl RunningRelay {
 
         // The relay prints the address it actually bound to.
         let stdout = child.stdout.take().expect("piped stdout");
+        let mut reader = std::io::BufReader::new(stdout);
         let mut line = String::new();
         {
             use std::io::BufRead as _;
-            let mut reader = std::io::BufReader::new(stdout);
             reader.read_line(&mut line).expect("relay greeting");
         }
         let addr = line
@@ -415,6 +421,7 @@ impl RunningRelay {
         Self {
             child,
             base: format!("http://{addr}"),
+            _stdout: reader,
         }
     }
 }

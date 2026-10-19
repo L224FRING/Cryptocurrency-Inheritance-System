@@ -19,6 +19,9 @@ pub struct DkgReport {
 pub struct SignatureReport {
     pub message: String,
     pub message_hex: String,
+    /// The exact bytes signed. Equal to `message_hex` in raw mode; in domain
+    /// mode it is the canonical SignRequest JSON wrapping.
+    pub signed_message: String,
     pub signers: Vec<u16>,
     pub shares_aggregated: u16,
     pub value: String,

@@ -26,10 +26,8 @@ contract FROSTEndToEndTest is Test {
     function test_FullSetup() public {
         vm.prank(owner);
         vault.setBeneficiary(beneficiary);
-        bytes memory compressed = new bytes(33);
-        compressed[0] = 0x02;
         vm.prank(owner);
-        frost.setGroupPublicKeyCompressed(compressed);
+        frost.setGroupPublicKeyCompressed(hex"037c2de6c714cc97e1575c17108305e37b6508e55fc16d724b9cceeaa16314a3d8");
         assertTrue(vault.beneficiarySet());
         assertTrue(frost.hasGroupKey());
     }
