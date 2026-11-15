@@ -11,18 +11,18 @@ contract FROSTVerifier {
     bool public groupKeyIsCompressed;
     uint8 public groupKeyPrefix;
 
-    mapping(bytes32 => bool) public usedSignatures;
-
     event GroupKeySet(uint256 x, uint256 y, bool compressed);
-    event SignatureVerified(bytes32 messageHash, address submitter);
 
     constructor() {
         owner = msg.sender;
         hasGroupKey = false;
     }
 
+    /// @notice The committee key is one-shot. Letting the owner swap it after
+    /// trustees sign would let them invalidate or redirect a release at will.
     function setGroupPublicKey(uint256 x, uint256 y) external {
         require(msg.sender == owner, "not owner");
+        require(!hasGroupKey, "group key already set");
         require(Secp256k1.isOnCurve(x, y), "point not on curve");
         groupPublicKeyX = x;
         groupPublicKeyY = y;
@@ -34,6 +34,7 @@ contract FROSTVerifier {
 
     function setGroupPublicKeyCompressed(bytes calldata pubkey) external {
         require(msg.sender == owner, "not owner");
+        require(!hasGroupKey, "group key already set");
         require(pubkey.length == 33, "must be compressed 33 bytes");
         uint8 prefix = uint8(pubkey[0]);
         require(prefix == 0x02 || prefix == 0x03, "invalid prefix");
@@ -50,7 +51,10 @@ contract FROSTVerifier {
         emit GroupKeySet(px, py, true);
     }
 
-    function verifyFROSTSignature(bytes32 messageHash, bytes calldata signature) external returns (bool) {
+    /// @notice Stateless verification. Replay protection lives in the vault so
+    /// that a third party cannot consume a valid release signature by calling
+    /// this verifier first.
+    function verifyFROSTSignature(bytes32 messageHash, bytes calldata signature) external view returns (bool) {
         require(hasGroupKey, "group key not set");
         require(signature.length == 65, "invalid signature length");
         uint8 prefix = uint8(signature[0]);
@@ -62,24 +66,15 @@ contract FROSTVerifier {
         }
         require(s > 0 && s < Secp256k1.N, "invalid signature scalar");
 
-        bytes32 sigHash = keccak256(abi.encodePacked(messageHash, signature));
-        require(!usedSignatures[sigHash], "signature already used");
-
         bytes memory rCompressed = signature[0:33];
         bytes memory zCompressed = abi.encodePacked(groupKeyPrefix, bytes32(groupPublicKeyX));
         require(Secp256k1.verifySchnorr(messageHash, rCompressed, zCompressed, s), "invalid signature");
 
-        usedSignatures[sigHash] = true;
-        emit SignatureVerified(messageHash, msg.sender);
         return true;
     }
 
     function getGroupPublicKey() external view returns (uint256 x, uint256 y, bool compressed) {
         require(hasGroupKey, "group key not set");
         return (groupPublicKeyX, groupPublicKeyY, groupKeyIsCompressed);
-    }
-
-    function isSignatureUsed(bytes32 messageHash, bytes calldata signature) external view returns (bool) {
-        return usedSignatures[keccak256(abi.encodePacked(messageHash, signature))];
     }
 }

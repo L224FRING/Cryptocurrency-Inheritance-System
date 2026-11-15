@@ -19,18 +19,47 @@ contract VDFTest is Test {
         assertEq(vdf.N(), TEST_N);
         assertGt(vdf.lastCheckIn(), 0);
         assertGt(vdf.currentChallenge(), 0);
+        assertEq(vdf.owner(), address(this));
+        assertEq(vdf.vault(), address(0));
     }
 
     function test_CheckInResetsState() public {
-        bool initialConfirmed = vdf.inactivityConfirmed();
         uint256 initialChallenge = vdf.currentChallenge();
-        uint256 initialLastCheckIn = vdf.lastCheckIn();
-        
+
         vm.roll(block.number + 5);
         vdf.checkIn();
-        
+
         assertFalse(vdf.inactivityConfirmed());
         assertNotEq(vdf.currentChallenge(), initialChallenge);
         assertEq(vdf.lastCheckIn(), block.number);
+    }
+
+    function test_OnlyOwnerOrBoundVaultCanCheckIn() public {
+        vm.prank(makeAddr("attacker"));
+        vm.expectRevert("not liveness authority");
+        vdf.checkIn();
+    }
+
+    function test_BoundVaultCanCheckIn() public {
+        address vault = makeAddr("vault");
+        vdf.bindVault(vault);
+
+        vm.prank(vault);
+        vdf.checkIn();
+
+        assertEq(vdf.lastCheckIn(), block.number);
+        assertEq(vdf.vault(), vault);
+    }
+
+    function test_BindVaultIsOneShot() public {
+        vdf.bindVault(makeAddr("vault"));
+        vm.expectRevert("vault already bound");
+        vdf.bindVault(makeAddr("other-vault"));
+    }
+
+    function test_OnlyOwnerCanBindVault() public {
+        vm.prank(makeAddr("attacker"));
+        vm.expectRevert("not owner");
+        vdf.bindVault(makeAddr("vault"));
     }
 }

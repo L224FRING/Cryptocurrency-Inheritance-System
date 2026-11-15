@@ -19,15 +19,20 @@ contract VDFRealTest is Test {
         assertFalse(vdf.inactivityConfirmed());
     }
 
-    function test_SubmitProofWithParams() public {
+    function test_SubmitProofRejectsInvalidProof() public {
         vm.roll(block.number + 10);
-        uint256 x = uint256(keccak256("test")) % TEST_N;
         uint256[] memory proof = new uint256[](3);
         proof[0] = 1;
         proof[1] = 2;
         proof[2] = 3;
-        // This will fail verification with dummy proof - but tests the interface
+        // The proof is bound to currentChallenge; a dummy proof must fail.
         vm.expectRevert("invalid proof");
-        vdf.submitVDFProofWithParams(x, 12345, proof, TEST_T, TEST_N);
+        vdf.submitVDFProof(12345, proof);
+    }
+
+    function test_SubmitProofRejectsEarlySubmission() public {
+        uint256[] memory proof = new uint256[](1);
+        vm.expectRevert("too early");
+        vdf.submitVDFProof(12345, proof);
     }
 }

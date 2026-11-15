@@ -46,10 +46,8 @@ contract FROSTOnchainTest is Test {
         assertEq(uint8(GROUP_KEY[0]), y & 1 == 1 ? 0x03 : 0x02, "prefix must match y parity");
     }
 
-    function test_RealFrostSignatureVerifies() public {
-        vm.prank(owner);
+    function test_RealFrostSignatureVerifies() public view {
         assertTrue(verifier.verifyFROSTSignature(releaseHash(), SIGNATURE));
-        assertTrue(verifier.isSignatureUsed(releaseHash(), SIGNATURE));
     }
 
     function test_SetGroupKeyUncompressedMatchesCompressed() public {
@@ -62,11 +60,17 @@ contract FROSTOnchainTest is Test {
         assertTrue(other.verifyFROSTSignature(releaseHash(), SIGNATURE));
     }
 
-    function test_CannotReuseSignature() public {
+    function test_VerificationIsStateless() public view {
+        // Two successful calls are fine: replay tracking belongs to the vault,
+        // not to the verifier.
+        assertTrue(verifier.verifyFROSTSignature(releaseHash(), SIGNATURE));
+        assertTrue(verifier.verifyFROSTSignature(releaseHash(), SIGNATURE));
+    }
+
+    function test_GroupKeyIsOneShot() public {
         vm.prank(owner);
-        verifier.verifyFROSTSignature(releaseHash(), SIGNATURE);
-        vm.expectRevert("signature already used");
-        verifier.verifyFROSTSignature(releaseHash(), SIGNATURE);
+        vm.expectRevert("group key already set");
+        verifier.setGroupPublicKeyCompressed(GROUP_KEY);
     }
 
     function test_DifferentMessageFails() public {
@@ -136,22 +140,28 @@ contract FROSTOnchainTest is Test {
 
     function test_SetGroupKeyRejectsOffCurvePoint() public {
         vm.prank(owner);
+        FROSTVerifier fresh = new FROSTVerifier();
+        vm.prank(owner);
         vm.expectRevert("point not on curve");
-        verifier.setGroupPublicKey(1, 2);
+        fresh.setGroupPublicKey(1, 2);
     }
 
     function test_SetCompressedKeyRejectsBadLength() public {
         vm.prank(owner);
+        FROSTVerifier fresh = new FROSTVerifier();
+        vm.prank(owner);
         vm.expectRevert("must be compressed 33 bytes");
-        verifier.setGroupPublicKeyCompressed(hex"02");
+        fresh.setGroupPublicKeyCompressed(hex"02");
     }
 
     function test_SetCompressedKeyRejectsBadPrefix() public {
         bytes memory bad = GROUP_KEY;
         bad[0] = 0x05;
         vm.prank(owner);
+        FROSTVerifier fresh = new FROSTVerifier();
+        vm.prank(owner);
         vm.expectRevert("invalid prefix");
-        verifier.setGroupPublicKeyCompressed(bad);
+        fresh.setGroupPublicKeyCompressed(bad);
     }
 
     function test_VerifyWithoutGroupKeyFails() public {

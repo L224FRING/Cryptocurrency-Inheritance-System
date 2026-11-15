@@ -17,17 +17,41 @@ contract VDFVerifier {
     uint256 public requiredDelay;
     bool public inactivityConfirmed;
 
+    /// @notice The deployer that may bind the vault once and reset liveness.
+    address public owner;
+    /// @notice The single InheritanceVault allowed to drive this clock.
+    address public vault;
+
     event CheckIn(uint256 challenge, uint256 blockNumber, uint256 timestamp);
+    event VaultBound(address indexed vault);
     event VDFSubmitted(uint256 y, address submitter, uint256[] proof);
     event InactivityConfirmed();
 
+    modifier onlyLivenessAuthority() {
+        require(msg.sender == owner || msg.sender == vault, "not liveness authority");
+        _;
+    }
+
     constructor(uint256 _n, uint256 _t, uint256 _requiredDelay) {
+        require(_n > 1, "invalid modulus");
+        require(_t > 0, "invalid T");
+        owner = msg.sender;
         N = _n;
         T = _t;
         requiredDelay = _requiredDelay;
         lastCheckIn = block.number;
         currentChallenge = generateChallenge();
         inactivityConfirmed = false;
+    }
+
+    /// @notice Bind the vault that owns this clock. One-shot and owner-only so
+    /// an unrelated contract cannot hijack the liveness signal.
+    function bindVault(address _vault) external {
+        require(msg.sender == owner, "not owner");
+        require(_vault != address(0), "zero vault");
+        require(vault == address(0), "vault already bound");
+        vault = _vault;
+        emit VaultBound(_vault);
     }
 
     function generateChallenge() internal view returns (uint256) {
@@ -38,7 +62,9 @@ contract VDFVerifier {
         )));
     }
 
-    function checkIn() external {
+    /// @notice Reset the liveness clock. Restricted so an attacker cannot keep
+    /// the estate alive forever by calling this directly.
+    function checkIn() external onlyLivenessAuthority {
         lastCheckIn = block.number;
         currentChallenge = generateChallenge();
         inactivityConfirmed = false;
@@ -113,18 +139,14 @@ contract VDFVerifier {
         }
     }
 
+    /// @notice Submit a proof for *the* current challenge and the committed
+    /// parameters. There is deliberately no caller-supplied x/t/n variant: that
+    /// would let anyone prove a VDF over an arbitrary instance and flip the
+    /// release gate without waiting.
     function submitVDFProof(uint256 y, uint256[] calldata proof) external {
         require(block.number > lastCheckIn + requiredDelay, "too early");
         require(!inactivityConfirmed, "already confirmed");
         require(verifyVDF(currentChallenge, y, proof, T, N), "invalid proof");
-        inactivityConfirmed = true;
-        emit VDFSubmitted(y, msg.sender, proof);
-        emit InactivityConfirmed();
-    }
-
-    function submitVDFProofWithParams(uint256 x, uint256 y, uint256[] calldata proof, uint256 t, uint256 n) external {
-        require(!inactivityConfirmed, "already confirmed");
-        require(verifyVDF(x, y, proof, t, n), "invalid proof");
         inactivityConfirmed = true;
         emit VDFSubmitted(y, msg.sender, proof);
         emit InactivityConfirmed();

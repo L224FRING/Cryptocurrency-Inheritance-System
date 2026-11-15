@@ -20,6 +20,7 @@ contract IntegrationTest is Test {
         vdf = new VDFVerifier(0x10001 * 0x7fffffff12345678, 100, 5);
         frost = new FROSTVerifier();
         vault = new InheritanceVault(address(vdf), address(frost));
+        vdf.bindVault(address(vault));
         vm.stopPrank();
     }
 

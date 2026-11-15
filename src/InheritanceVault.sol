@@ -9,12 +9,17 @@ contract InheritanceVault {
     FROSTVerifier public immutable frostVerifier;
     address public immutable owner;
     address public beneficiary;
-    
+
     uint256 public lastCheckInBlock;
     uint256 public lastCheckInTime;
     bytes32 public currentChallenge;
     bool public released;
     bool public beneficiarySet;
+
+    /// @notice Release signatures consumed by this vault. Keeping replay state
+    /// here, instead of in the verifier, stops anyone from griefing a valid
+    /// signature by front-running `verifyFROSTSignature`.
+    mapping(bytes32 => bool) public usedSignatures;
 
     event CheckedIn(address indexed owner, uint256 blockNumber, uint256 timestamp, bytes32 challenge);
     event BeneficiarySet(address indexed beneficiary);
@@ -43,6 +48,8 @@ contract InheritanceVault {
         return block.number > 0 ? blockhash(block.number - 1) : bytes32(0);
     }
 
+    /// @notice One owner action resets both the vault challenge and the VDF
+    /// liveness clock, so the two clocks can never drift apart.
     function checkIn() external onlyOwner {
         require(!released, "already released");
         lastCheckInBlock = block.number;
@@ -53,6 +60,7 @@ contract InheritanceVault {
             msg.sender,
             lastCheckInBlock
         ));
+        vdfVerifier.checkIn();
         emit CheckedIn(owner, lastCheckInBlock, lastCheckInTime, currentChallenge);
     }
 
@@ -65,21 +73,32 @@ contract InheritanceVault {
         emit BeneficiarySet(_beneficiary);
     }
 
-    function release(bytes calldata signature) external {
-        require(!released, "already released");
-        require(beneficiarySet, "beneficiary not set");
-        require(vdfVerifier.isInactivityConfirmed(), "vdf not confirmed");
-        
-        // Create release message hash bound to this vault and state
-        bytes32 releaseHash = keccak256(abi.encodePacked(
+    /// @notice The exact digest trustees sign. Includes the chain id so a
+    /// signature cannot be replayed on a fork or a different deployment.
+    function releaseHash() public view returns (bytes32) {
+        return keccak256(abi.encodePacked(
             "inheritance-release",
+            block.chainid,
             address(this),
             beneficiary,
             currentChallenge
         ));
-        
-        require(frostVerifier.verifyFROSTSignature(releaseHash, signature), "invalid signature");
-        
+    }
+
+    function release(bytes calldata signature) external {
+        require(!released, "already released");
+        require(beneficiarySet, "beneficiary not set");
+        require(vdfVerifier.isInactivityConfirmed(), "vdf not confirmed");
+
+        bytes32 digest = releaseHash();
+        bytes32 signatureId = keccak256(abi.encodePacked(digest, signature));
+        require(!usedSignatures[signatureId], "signature already used");
+
+        // The verifier is a pure/view check now: consuming a signature is this
+        // vault's job, after it has decided to release.
+        require(frostVerifier.verifyFROSTSignature(digest, signature), "invalid signature");
+        usedSignatures[signatureId] = true;
+
         // Effects before interaction (reentrancy-safe).
         released = true;
         emit Released(beneficiary, block.timestamp);

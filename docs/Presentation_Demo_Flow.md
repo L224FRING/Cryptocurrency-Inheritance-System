@@ -179,13 +179,9 @@ cast balance $VAULT_ADDR --rpc-url http://127.0.0.1:8545
 This is what happens while the owner is alive and well.
 
 ```bash
-# The VDF verifier owns the inactivity clock; checking in resets it
-# (and clears any confirmed inactivity).
-cast send $VDF_ADDR "checkIn()" \
-  --rpc-url http://127.0.0.1:8545 \
-  --unlocked --from $OWNER
-
-# The vault's own check-in refreshes the challenge bound into the release hash.
+# One owner transaction resets both clocks. The vault rotates its challenge
+# and calls vdfVerifier.checkIn(), which resets the inactivity timer and clears
+# any confirmed inactivity.
 cast send $VAULT_ADDR "checkIn()" \
   --rpc-url http://127.0.0.1:8545 \
   --unlocked --from $OWNER
@@ -264,8 +260,9 @@ via the `MODEXP` precompile). No trusted party is needed to submit it, and the
 sequential computation is what proves real time passed.
 
 **False-alarm demo (optional):** Before submitting, reset the liveness clock with
-`cast send $VDF_ADDR "checkIn()" --unlocked --from $OWNER` to show the owner
-returning clears any pending inactivity so the release never happens.
+`cast send $VAULT_ADDR "checkIn()" --unlocked --from $OWNER` to show the owner
+returning clears any pending inactivity so the release never happens. The VDF
+clock is no longer reachable directly by arbitrary accounts.
 
 ---
 
@@ -297,11 +294,15 @@ trustees must sign that exact 32-byte value verbatim (`--raw-message`):
 
 ```bash
 # The vault's release hash: keccak256(abi.encodePacked(
-#   "inheritance-release", vault, beneficiary, vaultCurrentChallenge)).
-# "inheritance-release" as hex, then packed 20-byte and 32-byte fields (no padding).
+#   "inheritance-release", block.chainid, vault, beneficiary,
+#   vaultCurrentChallenge)).
+# "inheritance-release" as hex, then a 32-byte chain id, then packed 20-byte and
+# 32-byte fields (no padding).
+CHAIN_ID=$(cast chain-id --rpc-url http://127.0.0.1:8545)
+CHAIN_WORD=$(cast to-uint256 "$CHAIN_ID")
 VAULT_CHALLENGE=$(cast call $VAULT_ADDR "getCurrentChallenge()(bytes32)" --rpc-url http://127.0.0.1:8545)
 RELEASE_HASH=$(cast keccak \
-  0x696e6865726974616e63652d72656c65617365${VAULT_ADDR#0x}${BENEFICIARY#0x}${VAULT_CHALLENGE#0x})
+  0x696e6865726974616e63652d72656c65617365${CHAIN_WORD#0x}${VAULT_ADDR#0x}${BENEFICIARY#0x}${VAULT_CHALLENGE#0x})
 echo "release hash = $RELEASE_HASH"
 
 export RELAY=http://127.0.0.1:8477

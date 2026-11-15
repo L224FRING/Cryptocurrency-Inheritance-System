@@ -21,6 +21,8 @@ contract DeployFull is Script {
         vdf = new VDFVerifier(testN, testT, requiredDelay);
         frost = new FROSTVerifier();
         vault = new InheritanceVault(address(vdf), address(frost));
+        // The vault is the only contract allowed to reset the VDF clock.
+        vdf.bindVault(address(vault));
         vm.stopBroadcast();
 
         console.log("deployer", deployer);

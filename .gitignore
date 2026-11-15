@@ -5,7 +5,7 @@ broadcast/
 *.log
 
 # Dependencies (reinstall with: forge install)
-lib/
+/lib/
 
 # Rust
 rust/**/target/

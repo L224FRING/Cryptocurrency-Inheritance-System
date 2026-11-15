@@ -20,6 +20,7 @@ contract EdgeCasesTest is Test {
         vdf = new VDFVerifier(0x10001 * 0x7fffffff12345678, 100, 5);
         frost = new FROSTVerifier();
         vault = new InheritanceVault(address(vdf), address(frost));
+        vdf.bindVault(address(vault));
         vm.stopPrank();
     }
 
@@ -35,7 +36,20 @@ contract EdgeCasesTest is Test {
         assertFalse(vault.released());
     }
 
-    function test_ReplayProtection() public {
+    function test_VaultCheckInResetsBothClocks() public {
+        bytes32 initialVaultChallenge = vault.currentChallenge();
+        uint256 initialVdfChallenge = vdf.currentChallenge();
+
+        vm.roll(block.number + 3);
+        vm.prank(owner);
+        vault.checkIn();
+
+        assertTrue(vault.currentChallenge() != initialVaultChallenge);
+        assertNotEq(vdf.currentChallenge(), initialVdfChallenge);
+        assertEq(vdf.lastCheckIn(), block.number);
+    }
+
+    function test_FrostVerifierIsStateless() public {
         bytes memory groupKey = hex"037c2de6c714cc97e1575c17108305e37b6508e55fc16d724b9cceeaa16314a3d8";
         bytes memory sig = hex"0352cf9dc6b1fd9ea023fcbd7e1ad627e901c2217d295420fe2773d08eb083fe45"
             hex"fb67cd0a5917e7bc98b047652a5cd84a6462f74923c27be708471b62f5b3696f";
@@ -43,9 +57,20 @@ contract EdgeCasesTest is Test {
 
         vm.startPrank(owner);
         frost.setGroupPublicKeyCompressed(groupKey);
-        frost.verifyFROSTSignature(msgHash, sig);
-        vm.expectRevert("signature already used");
-        frost.verifyFROSTSignature(msgHash, sig);
+        assertTrue(frost.verifyFROSTSignature(msgHash, sig));
+        // A second call must still succeed: verification no longer consumes the
+        // signature, so nobody can grief the vault by front-running it.
+        assertTrue(frost.verifyFROSTSignature(msgHash, sig));
+        vm.stopPrank();
+    }
+
+    function test_GroupKeyCannotBeRotated() public {
+        bytes memory groupKey = hex"037c2de6c714cc97e1575c17108305e37b6508e55fc16d724b9cceeaa16314a3d8";
+
+        vm.startPrank(owner);
+        frost.setGroupPublicKeyCompressed(groupKey);
+        vm.expectRevert("group key already set");
+        frost.setGroupPublicKeyCompressed(groupKey);
         vm.stopPrank();
     }
 

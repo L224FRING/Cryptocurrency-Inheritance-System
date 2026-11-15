@@ -34,9 +34,14 @@ contract EvaluationTest is Test {
         vdf = new VDFVerifier(VDF_N, VDF_T, 5);
         frost = new FROSTVerifier();
         vault = new InheritanceVault(address(vdf), address(frost));
+        vdf.bindVault(address(vault));
         vault.setBeneficiary(beneficiary);
-        frost.setGroupPublicKeyCompressed(KAT_GROUP_KEY);
         vm.stopPrank();
+    }
+
+    function _installKey(bytes memory groupKey) internal {
+        vm.prank(owner);
+        frost.setGroupPublicKeyCompressed(groupKey);
     }
 
     function _katProof() internal pure returns (uint256[] memory proof) {
@@ -91,12 +96,19 @@ contract EvaluationTest is Test {
     }
 
     function _confirmVDF() internal {
-        vdf.submitVDFProofWithParams(VDF_X, VDF_Y, _katProof(), VDF_T, VDF_N);
+        // The proof is KAT-bound to x = 0x1234, so point the live challenge at
+        // that value and wait out requiredDelay before submitting.
+        vm.store(address(vdf), bytes32(uint256(2)), bytes32(uint256(VDF_X)));
+        vm.roll(block.number + 10);
+        vdf.submitVDFProof(VDF_Y, _katProof());
     }
 
     function _releaseHash() internal view returns (bytes32) {
-        return
-            keccak256(abi.encodePacked("inheritance-release", address(vault), beneficiary, vault.getCurrentChallenge()));
+        return keccak256(
+            abi.encodePacked(
+                "inheritance-release", block.chainid, address(vault), beneficiary, vault.getCurrentChallenge()
+            )
+        );
     }
 
     function test_Gas_VaultCheckIn() public {
@@ -108,6 +120,7 @@ contract EvaluationTest is Test {
     }
 
     function test_Gas_VDFCheckIn() public {
+        vm.prank(owner);
         uint256 g = gasleft();
         vdf.checkIn();
         g -= gasleft();
@@ -127,6 +140,7 @@ contract EvaluationTest is Test {
     }
 
     function test_Gas_FrostVerify() public {
+        _installKey(KAT_GROUP_KEY);
         uint256 g = gasleft();
         frost.verifyFROSTSignature(KAT_MESSAGE, KAT_SIGNATURE);
         g -= gasleft();
@@ -136,10 +150,7 @@ contract EvaluationTest is Test {
     function test_Gas_Release() public {
         bytes32 releaseHash = _releaseHash();
         (bytes memory signature, bytes memory groupKey) = _signReleaseHash(releaseHash);
-
-        vm.startPrank(owner);
-        frost.setGroupPublicKeyCompressed(groupKey);
-        vm.stopPrank();
+        _installKey(groupKey);
 
         _confirmVDF();
         vm.deal(address(vault), 1 ether);
@@ -164,6 +175,7 @@ contract EvaluationTest is Test {
     }
 
     function test_DualGate_RequiresSignature() public {
+        _installKey(KAT_GROUP_KEY);
         _confirmVDF();
         vm.expectRevert("invalid signature");
         vault.release(KAT_SIGNATURE);
@@ -172,9 +184,8 @@ contract EvaluationTest is Test {
     function test_DualGate_ReleasesWithBoth() public {
         bytes32 releaseHash = _releaseHash();
         (bytes memory signature, bytes memory groupKey) = _signReleaseHash(releaseHash);
+        _installKey(groupKey);
 
-        vm.prank(owner);
-        frost.setGroupPublicKeyCompressed(groupKey);
         _confirmVDF();
 
         vault.release(signature);
@@ -184,9 +195,8 @@ contract EvaluationTest is Test {
     function test_Security_DoubleReleaseRejected() public {
         bytes32 releaseHash = _releaseHash();
         (bytes memory signature, bytes memory groupKey) = _signReleaseHash(releaseHash);
+        _installKey(groupKey);
 
-        vm.prank(owner);
-        frost.setGroupPublicKeyCompressed(groupKey);
         _confirmVDF();
         vault.release(signature);
 

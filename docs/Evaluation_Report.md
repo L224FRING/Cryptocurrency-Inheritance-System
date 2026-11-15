@@ -84,14 +84,15 @@ path:
 | VDF confirmed, wrong signature | revert `invalid signature` | pass |
 | VDF confirmed + signature over release hash | release succeeds | pass |
 | VDF proof submitted before `requiredDelay` | revert `too early` | pass |
-| Reuse of an already-used `(message, signature)` | revert `signature already used` | pass |
+| Proof submitted with caller-chosen `x/t/n` | cannot: only `submitVDFProof(y, proof)` exists | pass |
+| Release signature replay after a release | revert `already released` / `signature already used` | pass |
 | Release called twice | revert `already released` | pass |
 
 The successful-path test derives the release hash inside the vault as
-`keccak256(abi.encodePacked("inheritance-release", vault, beneficiary,
-currentChallenge))`, has a fresh 3-of-5 FROST committee sign exactly those bytes
-(`--raw-message`), installs that group key, confirms inactivity, and releases 1
-ETH to the beneficiary.
+`keccak256(abi.encodePacked("inheritance-release", block.chainid, vault,
+beneficiary, currentChallenge))`, has a fresh 3-of-5 FROST committee sign exactly
+those bytes (`--raw-message`), installs that group key, confirms inactivity, and
+releases 1 ETH to the beneficiary.
 
 **Result: the gate is conjunctive — either factor missing blocks release; both
 present releases funds.**
@@ -102,17 +103,17 @@ Measured in `test/Evaluation.t.sol` (execution gas, excludes 21k intrinsic).
 
 | Operation | Gas | Notes |
 |---|---:|---|
-| `VDFVerifier.checkIn()` | 34,896 | resets liveness clock + challenge |
-| `InheritanceVault.checkIn()` | 40,268 | resets vault challenge + timestamps |
-| `VDFVerifier.submitVDFProof(y, proof)` | 80,326 | `T = 100`, 7 proof points |
-| `FROSTVerifier.verifyFROSTSignature(hash, sig)` | 1,225,209 | secp256k1 scalar mult in EVM |
-| `InheritanceVault.release(sig)` | ~1.24M (1.18-1.27M) | FROST verify + effects + 1 ETH transfer; varies with signature bit pattern (8 samples) |
+| `VDFVerifier.checkIn()` | 35,076 | standalone reset of liveness clock + challenge |
+| `InheritanceVault.checkIn()` | 54,610 | one tx: vault challenge + timestamps + `vdfVerifier.checkIn()` |
+| `VDFVerifier.submitVDFProof(y, proof)` | 63,270 | `T = 100`, 7 proof points |
+| `FROSTVerifier.verifyFROSTSignature(hash, sig)` | 1,173,390 | stateless `view`; secp256k1 scalar mult in EVM |
+| `InheritanceVault.release(sig)` | ~1.25M | FROST verify + replay write + effects + 1 ETH transfer |
 
 Observations:
 
-- Check-ins are cheap (~35-40k), dominated by storage writes and the challenge
-  hash.
-- VDF proof submission is ~80k at `T = 100`; about 23k of that is the verifier
+- The owner now performs one check-in transaction instead of two; it costs
+  ~55k because it also resets the VDF clock.
+- VDF proof submission is ~63k at `T = 100`; about 23k of that is the verifier
   loop (see §5), the rest is timing/storage/event overhead.
 - `release()` is dominated by on-chain secp256k1 verification (~1.225M for the
   fixed KAT signature). Because the double-and-add loop branches on scalar bits,
@@ -205,7 +206,10 @@ Observations:
 
 | Property | Test | Result |
 |---|---|---|
-| Replay of a FROST signature rejected | `EdgeCases.test_ReplayProtection`, `FROSTOnchain.test_CannotReuseSignature` | pass |
+| Replay/griefing of a release signature prevented | `EdgeCases.test_FrostVerifierIsStateless`, `FROSTOnchain.test_VerificationIsStateless`, `Evaluation.test_Security_DoubleReleaseRejected` | pass |
+| Public cannot reset the liveness clock | `VDF.test_OnlyOwnerOrBoundVaultCanCheckIn`, `VDF.test_BindVaultIsOneShot` | pass |
+| VDF bypass via caller-chosen params removed | `VDFReal.test_SubmitProofRejectsInvalidProof`, `test_SubmitProofRejectsEarlySubmission` | pass |
+| FROST group key cannot be rotated | `FROSTOnchain.test_GroupKeyIsOneShot`, `EdgeCases.test_GroupKeyCannotBeRotated` | pass |
 | Early VDF proof rejected | `Evaluation.test_Security_EarlyProofRejected` | pass |
 | Release without VDF rejected | `Evaluation.test_DualGate_RequiresVDF` | pass |
 | Release without valid signature rejected | `Evaluation.test_DualGate_RequiresSignature` | pass |
@@ -216,7 +220,7 @@ Observations:
 | Non-owner cannot check in / set beneficiary / set key | `EdgeCases`, `FROSTOnchain` | pass |
 | Malformed signature (length, prefix, scalar range) rejected | `FROSTOnchain` | pass |
 
-Test suite totals at this commit: **69 Solidity tests** (11 suites) and
+Test suite totals at this commit: **77 Solidity tests** (11 suites) and
 **47 Rust tests**, all passing, plus the 18-case matrix.
 
 ## 8. Comparison: This System vs. a Naive Timer
@@ -231,7 +235,7 @@ A "naive timer" is the obvious baseline: a contract that releases when
 | Effect of one missed check-in | Funds release immediately at the deadline | Still requires `requiredDelay`, threshold trustees, and a valid proof |
 | Single point of failure | Owner key / owner liveness | Owner key for liveness, but release needs `t` independent trustees; no single trustee can release |
 | Premature-release risk (travel, hospital) | High | Mitigated by configurable delay and reset on check-in |
-| On-chain cost | check-in ~21-40k, release tens of k | check-in ~35-40k, VDF submit ~80k, release ~1.24M |
+| On-chain cost | check-in ~21-40k, release tens of k | one check-in ~55k, VDF submit ~63k, release ~1.25M |
 | Off-chain cost | None | VDF prover `O(T)`; FROST DKG + signing |
 | Trust assumptions | Chain + owner | Chain + owner + threshold trustees + unknown-factorization RSA modulus (trusted setup) |
 | Audit / implementation complexity | Low | High (EC math, hash-to-scalar, VDF, DKG, relay) |
@@ -243,7 +247,7 @@ measured in this repository; the "this system" column is measured (§4).*
 **Summary:** the naive timer is cheaper and simpler, but it trades away exactly
 the properties an inheritance system needs: resistance to false alarms, no
 single party able to move funds, and a release condition that cannot be
-accelerated. This system pays a one-time ~1.23M gas release cost and off-chain
+accelerated. This system pays a one-time ~1.25M gas release cost and off-chain
 prover work for those properties.
 
 ## 9. Threats to Validity

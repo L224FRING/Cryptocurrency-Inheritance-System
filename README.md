@@ -23,7 +23,27 @@ rust/frost-service/       Off-chain FROST crate (frost-core 3.0)
   src/main.rs             frost-service CLI
   src/bin/relay.rs        frost-relay (untrusted message relay)
   tests/                  Integration tests
+web/                      Next.js owner/trustee console (wagmi + MetaMask)
+  src/app/api/            Route handlers wrapping frost-service/frost-relay
+  scripts/deploy-local.sh Deploy to Anvil and write web/.env.local
 ```
+
+## Web console
+
+The `web/` app is a MetaMask-enabled owner/trustee console for a local Anvil
+deployment. With `anvil` running from the repository root:
+
+```bash
+cargo build --manifest-path rust/frost-service/Cargo.toml
+web/scripts/deploy-local.sh       # writes web/.env.local + clears old shares
+cd web && pnpm install && pnpm dev
+```
+
+Open <http://localhost:3000>, import the Anvil deployer key into MetaMask, and
+use `/owner` for beneficiary setup, deposits, check-ins, DKG and group-key
+installation, and `/trustee` for the VDF proof, threshold release signature and
+`vault.release()`. See `web/README.md` for the full walkthrough and the demo
+custody warning.
 
 ## Requirements
 
@@ -103,8 +123,8 @@ During DKG, each party generates a random polynomial; the final secret share is 
 ## On-chain
 
 - `VDFVerifier`: Pietrzak verification (uses MODEXP). Rust and Solidity share identical challenge encoding.
-- `FROSTVerifier`: Real threshold Schnorr verification on-chain. `Secp256k1.sol` implements secp256k1 point arithmetic (Jacobian add/double/mul, compressed-point decompression) and the FROST challenge `e = H2(R ‖ Z ‖ msg)` (RFC 9380 `expand_message_xmd` over SHA-256). Verification checks `s·G == R + e·Z`, plus group-key-on-curve, 65-byte compact signature, `0 < s < N` range, and replay protection. Cross-validated against a real Rust-produced signature in `test/fixtures/frost_kat.json`.
-- `InheritanceVault`: Requires both VDF confirmation and threshold signature before releasing funds to beneficiary. Owner check-ins reset the inactivity window.
+- `FROSTVerifier`: Real threshold Schnorr verification on-chain. `Secp256k1.sol` implements secp256k1 point arithmetic (Jacobian add/double/mul, compressed-point decompression) and the FROST challenge `e = H2(R ‖ Z ‖ msg)` (RFC 9380 `expand_message_xmd` over SHA-256). Verification checks `s·G == R + e·Z`, plus group-key-on-curve, 65-byte compact signature, and `0 < s < N` range. Verification is a `view` function; replay state lives in the vault, so a third party cannot consume a valid signature. The committee key is one-shot. Cross-validated against a real Rust-produced signature in `test/fixtures/frost_kat.json`.
+- `InheritanceVault`: Requires both VDF confirmation and threshold signature before releasing funds to beneficiary. One owner `checkIn()` resets both the vault challenge and the VDF liveness clock. Release hashes include `block.chainid`, and consumed signatures are tracked per vault.
 
 ## Development notes
 
@@ -113,7 +133,7 @@ During DKG, each party generates a random polynomial; the final secret share is 
 - `forge test` doesn't build Rust automatically — `cargo build` first.
 - The trustees sign a canonical (domain/payload/session) message by default; `--raw-message` makes them sign the payload bytes verbatim, which is what the vault's `releaseHash` requires.
 - On-chain EC math needs `via_ir = true` (set in `foundry.toml`).
-- Tests: 47 Rust (including the KAT generator, per-trustee CLI, and threaded protocol tests) + 58 Solidity. All pass.
+- Tests: 47 Rust (including the KAT generator, per-trustee CLI, and threaded protocol tests) + 77 Solidity. All pass.
 - For a live demo, see `docs/Presentation_Demo_Flow.md`. For design details, see `docs/FrostService.md`.
 
 ## Deployment
